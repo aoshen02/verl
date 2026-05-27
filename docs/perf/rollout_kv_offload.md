@@ -11,6 +11,9 @@ prefix KV reduces the re-prefill cost.
 
 ## Setup Mooncake + vLLM
 
+Use vLLM 0.22 or newer; earlier vLLM versions do not provide the full
+MooncakeStoreConnector hard-reset behavior required by this integration.
+
 Follow vLLM's official guide for installing the Mooncake client, starting a
 master, and writing the JSON config:
 **<https://docs.vllm.ai/en/latest/features/mooncake_store_connector_usage/>**
