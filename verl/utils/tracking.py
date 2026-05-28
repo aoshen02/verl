@@ -69,6 +69,7 @@ class Tracking:
         self.logger = {}
 
         if "tracking" in default_backend or "wandb" in default_backend:
+            import hashlib
             import os
 
             import wandb
@@ -77,7 +78,25 @@ class Tracking:
             if config and config["trainer"].get("wandb_proxy", None):
                 settings = wandb.Settings(https_proxy=config["trainer"]["wandb_proxy"])
             entity = os.environ.get("WANDB_ENTITY", None)
-            wandb.init(project=project_name, name=experiment_name, entity=entity, config=config, settings=settings)
+            # Resume support: reuse the same wandb run across restarts so that
+            # crash-then-resume training appends to the existing curve instead
+            # of starting a fresh run. The wandb run id is derived
+            # deterministically from (project_name, experiment_name) so reruns
+            # of the same experiment converge on the same run id without
+            # requiring the user to track it manually. Users who already
+            # manage their own ids can override via the WANDB_RUN_ID env var.
+            run_id = os.environ.get("WANDB_RUN_ID", None)
+            if run_id is None:
+                run_id = hashlib.md5(f"{project_name}_{experiment_name}".encode()).hexdigest()[:8]
+            wandb.init(
+                project=project_name,
+                name=experiment_name,
+                id=run_id,
+                resume="allow",
+                entity=entity,
+                config=config,
+                settings=settings,
+            )
             self.logger["wandb"] = wandb
 
         if "trackio" in default_backend:
