@@ -145,6 +145,11 @@ class MegatronEngine(BaseEngine):
             )
             extra_args["dynamic_context_parallel"] = self.engine_config.dynamic_context_parallel
 
+        # MC_DBG: propagate nccl_timeout (verl shell config) into Megatron PG creation.
+        # Without this, Megatron uses its default `distributed_timeout_minutes=30`,
+        # ignoring `actor_rollout_ref.nccl_timeout=600` in the launch script.
+        import os as _os
+        _to_min = int(_os.environ.get("MC_DBG_NCCL_TIMEOUT_MIN", "10"))
         mpu.initialize_model_parallel(
             tensor_model_parallel_size=self.engine_config.tensor_model_parallel_size,
             pipeline_model_parallel_size=self.engine_config.pipeline_model_parallel_size,
@@ -154,8 +159,12 @@ class MegatronEngine(BaseEngine):
             expert_model_parallel_size=self.engine_config.expert_model_parallel_size,
             expert_tensor_parallel_size=self.engine_config.expert_tensor_parallel_size,
             nccl_communicator_config_path=None,
+            distributed_timeout_minutes=_to_min,
             **extra_args,
         )
+        import torch.distributed as _td
+        if _td.is_initialized() and _td.get_rank() == 0:
+            print(f"[mc_dbg] Megatron init_model_parallel timeout={_to_min}min", flush=True)
 
     def _build_tf_config(self):
         from verl.utils.megatron_utils import mapping_string_to_attn_backend
