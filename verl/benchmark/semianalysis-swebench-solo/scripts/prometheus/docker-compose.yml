@@ -1,0 +1,52 @@
+# Independent Prometheus + Grafana stack for verl SWE-Bench RL monitoring.
+#
+# Lives on node-08 host (current ray head). Config + TSDB on NFS lustre so
+# any Ray node can write the scrape config via verl's update_prometheus_config.
+#
+# Start:
+#   docker compose up -d prometheus            # prom only
+#   docker compose up -d                       # prom + grafana
+#
+# Stop:
+#   docker compose down                        # keeps TSDB data
+#   docker compose down -v                     # also wipes grafana state (TSDB on lustre is untouched)
+#
+# verl integration: see README.md "Hydra keys" section.
+
+services:
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    container_name: prometheus-user
+    restart: unless-stopped
+    # --network=host so verl reload tasks running on node-08 (ray head) can
+    # curl http://10.0.2.108:9090/-/reload. Other ray nodes' reload tasks
+    # silently fail per verl's intended design.
+    network_mode: host
+    volumes:
+      - /mnt/shared/prom-user/config:/etc/prometheus
+      - /mnt/shared/prom-user/data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=30d'
+      - '--web.enable-lifecycle'                  # /-/reload endpoint
+      - '--web.listen-address=:9090'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+
+  grafana:
+    image: grafana/grafana-oss:11.0.0
+    container_name: grafana-user
+    restart: unless-stopped
+    # --network=host so grafana datasource can hit prometheus on localhost:9090
+    network_mode: host
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_SERVER_HTTP_PORT=3000
+    volumes:
+      - /mnt/shared/prom-user/grafana-data:/var/lib/grafana
+      - /mnt/shared/prom-user/grafana-provisioning:/etc/grafana/provisioning
+    depends_on:
+      - prometheus

@@ -1,0 +1,48 @@
+# Prometheus + Grafana stack for Verda GB300 RL monitoring.
+#
+# Lives on tray02 host (current Verda ray head). Config + TSDB on WEKA so any
+# tray can write the scrape config via verl's update_prometheus_config.
+#
+# Start:
+#   bash scripts/prometheus/up.verda.sh
+#
+# Stop:
+#   sudo docker compose -f docker-compose.verda.yml down                 # keeps TSDB
+#   sudo docker compose -f docker-compose.verda.yml down -v              # also wipes grafana state
+
+services:
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    container_name: prometheus-user
+    restart: unless-stopped
+    # --network=host so verl reload tasks on tray02 (ray head) can curl
+    # http://10.0.1.166:9090/-/reload. Other tray nodes' reload tasks
+    # silently fail per verl's intended design.
+    network_mode: host
+    volumes:
+      - /mnt/shared/user/monitoring/config:/etc/prometheus
+      - /mnt/shared/user/monitoring/data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=30d'
+      - '--web.enable-lifecycle'
+      - '--web.listen-address=:9090'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+
+  grafana:
+    image: grafana/grafana-oss:11.0.0
+    container_name: grafana-user
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_SERVER_HTTP_PORT=3000
+    volumes:
+      - /mnt/shared/user/monitoring/grafana-data:/var/lib/grafana
+      - /mnt/shared/user/monitoring/grafana-provisioning:/etc/grafana/provisioning
+    depends_on:
+      - prometheus

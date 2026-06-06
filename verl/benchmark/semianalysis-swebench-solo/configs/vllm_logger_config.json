@@ -1,0 +1,27 @@
+{
+    "formatters": {
+        "vllm": {
+            "class": "vllm.logging_utils.NewLineFormatter",
+            "datefmt": "%m-%d %H:%M:%S",
+            "format": "VLLM %(levelname)s %(asctime)s [%(filename)s:%(lineno)d] [pid=%(process)d] %(message)s"
+        }
+    },
+    "handlers": {
+        "vllm_file": {
+            "class": "logging.FileHandler",
+            "formatter": "vllm",
+            "level": "DEBUG",
+            "filename": "/workspace/vllm/projects/semianalysis-swebench-solo/agent_run/results/qwen3_235b_1R_debug_mem08_nointer/vllm_worker_boot.log",
+            "mode": "a"
+        }
+    },
+    "loggers": {
+        "vllm": {
+            "handlers": ["vllm_file"],
+            "level": "DEBUG",
+            "propagate": false
+        }
+    },
+    "version": 1,
+    "disable_existing_loggers": false
+}

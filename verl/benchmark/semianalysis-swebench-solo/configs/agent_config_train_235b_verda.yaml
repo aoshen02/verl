@@ -1,0 +1,59 @@
+# Qwen3-235B-A22B training agent config — Verda GB300 variant.
+# Diff from agent_config_train_235b.yaml (GB200):
+#   concurrency 384 → 512 (64 × 8 rollout replicas, push for higher throughput)
+#   log_dir /tmp/swerebench_qwen3_235b → /mnt/shared/user/logs/swerebench_qwen3_235b/
+#                                        (WEKA shared so all trays log to same place)
+- name: swe_agent
+
+  _target_: uni_agent.agent_loop.UniAgentLoop
+
+  # concurrency = GLOBAL trajectory budget across the whole cluster.
+  # uni-agent code (uni_agent/agent_loop.py:37-41) divides this by
+  #   actor_rollout_ref.rollout.agent.num_workers (= 8) to get a per-worker
+  #   asyncio.Semaphore. With 8 rollout replicas:
+  #     512 / 8 = 64 in-flight trajectories per vllm replica
+  #
+  # Why 64 (raised from 384/8=48):
+  #   - qwen3_235b_bench_verda round-2 (bench profile ~36K mean ctx) shows
+  #     N=96 per replica is the no-preemption ceiling, N=112+ thrashes KV.
+  #   - Real SWE-bench round-11 mean trajectory ctx ≈ 100K (2.8× the bench
+  #     profile). So real per-replica safe is ~96/2.8 ≈ 34 IF all
+  #     trajectories were 100% mid-decode at every instant.
+  #   - But Modal tool gap idles vllm ~30-50% of wall-clock, so peak in-flight
+  #     ≈ 64 × 0.6 ≈ 38 — still tolerable. We accept some preemption risk in
+  #     exchange for higher decoder utilization. Monitor wandb actor/rollout
+  #     KV utilization + preemption counter in early steps and back off to 48
+  #     if KV pins at 99% with sustained waiting > 0.
+  # Modal sandbox cap = 1000 global (paid plan). 512 well within cap.
+  concurrency: 420
+  log_dir: /mnt/shared/user/logs/swerebench_qwen3_235b
+  mask_abnormal_exit_traj: false
+  tool_parser: hermes  # Qwen3-235B-A22B uses Hermes tool-call template (same as 30B).
+                       # Default qwen3_coder would silently mis-parse → training broken.
+
+  interaction:
+    action_timeout: 300
+    max_turns: 300  # aligned with main doc
+
+  env:
+    deployment:
+      type: modal
+      startup_timeout: 300
+      runtime_timeout: 300
+      deployment_timeout: 3600
+    env_variables:
+      PIP_PROGRESS_BAR: "off"
+      PIP_CACHE_DIR: "~/.cache/pip"
+      PAGER: "cat"
+      MANPAGER: "cat"
+      LESS: "-R"
+      TQDM_DISABLE: "1"
+      GIT_PAGER: "cat"
+
+  tools:
+    - name: str_replace_editor
+    - name: execute_bash
+    - name: submit
+
+  reward:
+    eval_timeout: 300

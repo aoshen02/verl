@@ -1,0 +1,82 @@
+# Ray runtime env for Phase 4 fully-async RL training — Verda GB300 variant.
+#
+# Mount-path layout (container view, mount `-v /mnt/shared:/mnt/shared` only):
+#   /mnt/shared/user/repos/uni-agent              (a563cc6 + 414-line local patch)
+#   /mnt/shared/user/repos/verl-worktree          (460ccf3c, clean)
+#   /mnt/shared/user/data/swe_agent/              (parquets, rsync'd from lustre)
+#   /mnt/shared/user/models/Qwen3-235B-A22B-Instruct-2507/   (HF direct download)
+# Megatron-LM is pip-installed inside image at 5b376fde (not mounted).
+# flash-linear-attention removed (Qwen3-235B Instruct-2507 doesn't use GDN).
+
+working_dir: /mnt/shared/user/repos/uni-agent
+excludes: ["/.git/", "/.venv/", "/__pycache__/"]
+
+pip:
+  - loguru
+  - pydantic
+  - pydantic_settings
+  - swebench
+  - modal
+  - swe-rex
+  - boto3
+  - aiohttp
+
+env_vars:
+  PYTHONPATH: "/mnt/shared/user/repos/verl-worktree:/mnt/shared/user/repos/uni-agent"
+  TORCH_NCCL_AVOID_RECORD_STREAMS: "1"
+  CUDA_DEVICE_MAX_CONNECTIONS: "1"
+  # 2026-05-23: DeepEP HybridEP runtime JIT 在 csrc/hybrid_ep/jit/compiler.cu:34 读
+  # std::getenv("CUDA_HOME") 拼 nvcc_path,容器 env 里 CUDA_HOME 是空 → "/bin/nvcc" not found。
+  # PyTorch cpp_extension 内部 fallback (cpp_extension.py:118) 只设模块常量,不会写 os.environ,
+  # 所以 DeepEP 的 C++ getenv 看不到。必须显式从 runtime_env 注入。
+  CUDA_HOME: "/usr/local/cuda"
+  # 2026-05-21: bond0 data plane lost DHCP, Ray on mgmt VLAN (bond0.225, 10.0.0.0/24).
+  # Force Gloo + NCCL bootstrap socket onto bond0.225 to avoid hostname resolving to
+  # /etc/hosts loopback alias 127.0.1.1 (causes "connectFullMesh failed: 127.0.1.1:9129").
+  GLOO_SOCKET_IFNAME: "bond0.225"
+  NCCL_SOCKET_IFNAME: "bond0.225"
+  # NOTE: 不要设 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+  # vLLM CuMemAllocator (sleep mode / weight transfer) 跟 expandable_segments 不兼容
+  # vllm/device_allocator/cumem.py:132 AssertionError 直接挂 — 见 round-7
+  # NCCL fabric quartet — see memory feedback (never disable on GB200 NVL72)
+  NCCL_CUMEM_ENABLE: "1"
+  NCCL_NVLS_ENABLE: "1"
+  NCCL_MNNVL_ENABLE: "1"
+  VLLM_USE_NCCL_SYMM_MEM: "1"
+  # === 1236Z debug: per-layer log + NCCL FlightRecorder + AF_INET (errno 97 fix) ===
+  # === 1530Z debug v2: ALL ranks log (was rank-0), per-rank file, op_id counter ===
+  MC_LAYER_DBG: "1"
+  MC_LAYER_DBG_DIR: "/mnt/shared/user/mc_layer_1530Z"
+  # MC_DBG_NCCL_TIMEOUT_MIN=10 → 600s watchdog (was 1800s default, user-asked 600s).
+  # Patched in verl/workers/engine/megatron/transformer_impl.py:148 (2026-05-21).
+  MC_DBG_NCCL_TIMEOUT_MIN: "10"
+  # User-requested 2026-05-21: must take effect this run.
+  CUDA_LAUNCH_BLOCKING: "1"
+  NCCL_DEBUG: "TRACE"
+  # Add P2P + PROXY + TUNING subsystems — needed to see MNNVL P2P channel progress
+  NCCL_DEBUG_SUBSYS: "INIT,NET,ENV,COLL,P2P,TUNING,PROXY"
+  NCCL_DEBUG_FILE: "/mnt/shared/user/nccl_logs_1530Z/nccl_%h_%p.log"
+  TORCH_NCCL_DUMP_ON_TIMEOUT: "1"
+  TORCH_NCCL_TRACE_BUFFER_SIZE: "200000"  # deprecated but tolerated, kept for older NCCL
+  TORCH_FR_BUFFER_SIZE: "200000"          # new name (warning in 1317Z log)
+  TORCH_NCCL_TRACE_CPP_STACK: "1"
+  TORCH_FR_CPP_STACK: "1"                 # new name
+  TORCH_NCCL_DESYNC_DEBUG: "1"
+  TORCH_NCCL_ENABLE_TIMING: "1"
+  TORCH_NCCL_DEBUG_INFO_TEMP_FILE: "/mnt/shared/user/nccl_logs_1530Z/torch_nccl_trace_%h_%p"
+  # New: heartbeat — abort if NCCL progress engine stalls 60s (vs 600s collective timeout)
+  TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC: "60"
+  NCCL_SET_THREAD_NAME: "1"  # NCCL threads visible in py-spy
+  NCCL_SOCKET_FAMILY: "AF_INET"
+  # MODAL credentials (semianalysis TEAM workspace API Token, 2026-05-17 finalized).
+  # Token created with `modal token set --profile=semianalysis` to ensure team scope.
+  # 历史:
+  #   - user-b personal:   <redacted> / <redacted> (废)
+  #   - user personal:  <redacted> / <redacted> (废, 是 user Starter 不是 semianalysis team)
+  #   - semianalysis team: 当前 ✅
+  # uni-agent 会在 semianalysis workspace 下自动建 `swe-rex` app, dashboard:
+  #   https://modal.com/apps/semianalysis/main
+  MODAL_TOKEN_ID: "${MODAL_TOKEN_ID}"
+  MODAL_TOKEN_SECRET: "${MODAL_TOKEN_SECRET}"
+  # WANDB API key (user-provided 2026-05-16)
+  WANDB_API_KEY: "${WANDB_API_KEY}"

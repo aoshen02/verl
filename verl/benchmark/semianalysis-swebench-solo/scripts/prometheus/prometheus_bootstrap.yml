@@ -1,0 +1,22 @@
+# Initial prometheus config — minimal scrape so prom can start before verl runs.
+# verl's update_prometheus_config will OVERWRITE this file with the real scrape
+# targets (vLLM /metrics endpoints) at training launch.
+#
+# After verl rewrite, this file will contain:
+#   - job_name: ray         (file_sd_configs pointing at /tmp/ray/... in each
+#                            ray node container — NOT readable by this prom
+#                            container, so this job will fail. acceptable for
+#                            now; vLLM metrics are what we care about.)
+#   - job_name: rollout     (static_configs with all vLLM HTTP /metrics
+#                            endpoints, e.g. ["10.0.2.106:port",
+#                            "10.0.2.107:port", ...])
+
+global:
+  scrape_interval: 10s
+  evaluation_interval: 10s
+
+scrape_configs:
+  # Prom scrapes itself (sanity).
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
