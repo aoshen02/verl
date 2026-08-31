@@ -502,11 +502,11 @@ def fsdp2_load_full_state_dict(model: torch.nn.Module, full_state: dict, device_
         # use torch 2.7.0 copy from verl/third_party/torch/distributed/checkpoint
         from verl.third_party.torch.distributed.checkpoint.state_dict import StateDictOptions, set_model_state_dict
 
-    # To broadcast, it needs to be instantiated in the GPU.
-    if dist.get_rank() == 0:
-        model = model.to(device=get_device_id(), non_blocking=True)
-    else:
-        model = model.to_empty(device=get_device_id())
+    buffers = {name: buffer.detach().cpu() for name, buffer in model.named_buffers() if not buffer.is_meta}
+    model = model.to_empty(device=get_device_id())
+    for name, buffer in model.named_buffers():
+        if name in buffers:
+            buffer.copy_(buffers[name].to(buffer.device))
 
     cpu_offload = cpu_offload is not None
     options = StateDictOptions(full_state_dict=True, cpu_offload=cpu_offload, broadcast_from_rank0=True)
