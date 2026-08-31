@@ -684,32 +684,33 @@ _architecture_to_auto_class = {
 
 
 def get_hf_auto_model_class(hf_config):
-    has_remote_code = hasattr(hf_config, "auto_map") and any(
-        hf_config.architectures[0] in val for val in hf_config.auto_map.values()
-    )
+    architectures = getattr(hf_config, "architectures", None) or []
+    architecture = architectures[0] if architectures else None
+    auto_map = getattr(hf_config, "auto_map", None) or {}
+    has_remote_code = architecture is not None and any(architecture in val for val in auto_map.values())
     if has_remote_code:
-        auto_class = next(k for k, v in hf_config.auto_map.items() if hf_config.architectures[0] in v)
+        auto_class = next(k for k, v in auto_map.items() if architecture in v)
         match auto_class:
             case "AutoModelForVision2Seq":
-                actor_module_class = AutoModelForVision2Seq
+                return AutoModelForVision2Seq
             case "AutoModelForCausalLM":
-                actor_module_class = AutoModelForCausalLM
+                return AutoModelForCausalLM
             case "AutoModelForImageTextToText":
-                actor_module_class = AutoModelForImageTextToText
+                return AutoModelForImageTextToText
             case _:
-                actor_module_class = AutoModel
-    else:
-        actor_module_class = AutoModel
-        # For VLM models, we use type to check instead of architecture
-        if type(hf_config) in AutoModelForImageTextToText._model_mapping.keys():
-            actor_module_class = AutoModelForImageTextToText
-        else:
-            for key, cls in _architecture_to_auto_class.items():
-                if key in hf_config.architectures[0]:
-                    actor_module_class = cls
-                    break
-
-    return actor_module_class
+                return AutoModel
+    if type(hf_config) in AutoModelForImageTextToText._model_mapping.keys():
+        if (
+            getattr(hf_config, "model_type", None) == "qwen4_exp"
+            and architecture == "Qwen4ExpForCausalLM"
+        ):
+            return AutoModelForCausalLM
+        return AutoModelForImageTextToText
+    if architecture is not None:
+        for key, cls in _architecture_to_auto_class.items():
+            if key in architecture:
+                return cls
+    return AutoModel
 
 
 def _pad_last_dim_and_cat(values: list[torch.Tensor], key: str) -> torch.Tensor:
