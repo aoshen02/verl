@@ -559,14 +559,19 @@ def _select_fsdp2_wrap_targets(model, fsdp_transformer_layer_cls_to_wrap):
     _wrap_by_name = set() if _tie else {"embed_tokens", "lm_head"}
 
     modules = []
+    module_names = []
     for name, module in model.named_modules():
         leaf_name = name.rsplit(".", 1)[-1] if "." in name else name
-        if (
+        is_wrap_target = (
             module.__class__.__name__ in fsdp_transformer_layer_cls_to_wrap
             or (isinstance(module, nn.Embedding) and not _tie)
             or (leaf_name in _wrap_by_name and hasattr(module, "weight"))
+        )
+        if is_wrap_target and not any(
+            not parent_name or name.startswith(f"{parent_name}.") for parent_name in module_names
         ):
             modules.append(module)
+            module_names.append(name)
     return modules
 
 
