@@ -16,8 +16,9 @@ requires-python = ">=3.10,<3.13"
 #
 #   uv sync --extra fsdp --extra vllm     # or: python manage_envs.py sync fsdp vllm
 #
-# All backends use torch 2.11.0: vllm/sglang/fsdp/megatron on cu130, cpu on cpu
-# wheels (CI/dev). Both torch worlds coexist via [tool.uv].conflicts forks.
+# This Qwen-specialized branch uses the model image's CUDA-13 Torch 2.13.0 for
+# the vLLM + FSDP pair. SGLang/Megatron and CPU retain their existing isolated
+# Torch 2.11.0 worlds.
 # DEFERRED: trtllm (torch 2.10.0+cu130) — its RC sdist makes `uv lock` explode.
 # cuDNN/NCCL: torch's wheel pins them, so after `uv lock` sync CUDNN_VERSION /
 # NCCL_VERSION in docker/Dockerfile.uv.cu130 to the resolved values.
@@ -73,6 +74,36 @@ verl-core = [
     "pytest-rerunfailures",
 ]
 
+# The specialized serving image owns vLLM, FlashInfer, and their compiled
+# extensions. This text-only FSDP lane deliberately keeps those packages out of
+# UV and uses eager/SDPA attention, so its only native runtime is the matching
+# Torch wheel below.
+image-runtime-core = [
+    "verl[transferqueue]",
+    "accelerate",
+    "codetiming",
+    "datasets",
+    "dill",
+    "hydra-core",
+    "numpy>=2.0.0",
+    "pandas",
+    "peft",
+    "pyarrow>=19.0.0",
+    "pybind11",
+    "pylatexenc",
+    "ray[default]>=2.41.0",
+    "torchdata",
+    "tensordict>=0.8.0,<=0.10.0,!=0.9.0",
+    "wandb",
+    "packaging>=20.0",
+    "tensorboard",
+    "fastapi",
+    "uvicorn",
+    "mathruler",
+    "cachetools",
+    "nvtx",
+]
+
 # Pins flash-attn once for the fsdp / megatron parents (wheelhouse-routed below).
 # Don't install alone — needs the parent extra's torch / cuDNN pins.
 flash-attn-cu130torch211 = ["flash-attn==2.8.3"]
@@ -86,18 +117,9 @@ cupy-cu130 = ["cupy-cuda13x==14.0.1"]
 
 # ---- inference backends ----------------------------------------------------
 vllm = [
-    "verl[verl-core]",
-    "torch==2.11.0",
-    "torchvision==0.26.0",
-    "torchaudio==2.11.0",
-    # PyPI's 0.24.0 wheel is already a cu130 / torch-2.11 abi3 build, so it needs
-    # no wheelhouse routing and no source build.
-    "vllm==0.24.0",
-    # flashinfer is a transitive dep vllm 0.24 hard-pins to ==0.6.12 (pure-python
-    # from PyPI); the wheelhouse's 0.6.13 doesn't match, so it isn't routed.
-    "mbridge",
-    # vllm 0.24 needs transformers 5.5.3 (enforced in override-dependencies below).
-    "transformers==5.5.3",
+    "verl[image-runtime-core]",
+    "torch==2.13.0",
+    "transformers==5.16.0",
 ]
 
 sglang = [
@@ -134,16 +156,10 @@ sglang = [
 
 # ---- training backends -----------------------------------------------------
 fsdp = [
-    "verl[verl-core]",
-    "verl[flash-attn-cu130torch211]",
-    "verl[cupy-cu130]",
-    "torch==2.11.0",
-    "torchvision==0.26.0",
-    "torchaudio==2.11.0",
-    "liger-kernel>=0.8.2",
+    "verl[image-runtime-core]",
+    "torch==2.13.0",
     "trl==0.27.0",
-    # transformers NOT pinned here: trainers inherit the synced engine's version
-    # (vllm 5.5.3 / sglang 5.3.0). See override-dependencies below.
+    "transformers==5.16.0",
 ]
 
 # apex / TE / flash-attn / megatron-bridge come prebuilt from the wheelhouse;
@@ -307,13 +323,14 @@ environments = [
 conflicts = [
     # (trtllm DEFERRED — add `{ extra = "trtllm" }` to each set when it rejoins.)
     [{ extra = "vllm" }, { extra = "sglang" }, { extra = "cpu" }],
-    [{ extra = "fsdp" }, { extra = "cpu" }],
-    [{ extra = "megatron" }, { extra = "cpu" }],
+    [{ extra = "fsdp" }, { extra = "megatron" }, { extra = "cpu" }],
+    [{ extra = "vllm" }, { extra = "megatron" }],
+    [{ extra = "sglang" }, { extra = "fsdp" }],
 ]
 
 # Global override pins:
 #   * transformers tracks the inference engine (overrides are absolute): vllm ->
-#     5.5.3, sglang/cpu -> 5.3.0. An `extra` marker matches only a requirement
+#     5.16.0, sglang/cpu -> 5.3.0. An `extra` marker matches only a requirement
 #     verl declares under that extra, never a transitive one, and an override
 #     that matches nothing drops the requirement — so verl-core carries the
 #     baseline. Its entry is a range, not a pin, so it intersects with the
@@ -334,10 +351,10 @@ conflicts = [
 #     `pip uninstall -y flash-attn-4`; sglang itself only imports fa4 for its
 #     non-default "fa4" attention backend.
 override-dependencies = [
-    "transformers==5.5.3 ; extra == 'vllm'",
+    "transformers==5.16.0 ; extra == 'vllm'",
     "transformers==5.3.0 ; extra == 'sglang'",
     "transformers==5.3.0 ; extra == 'cpu'",
-    "transformers>=5.3.0,<=5.5.3 ; extra == 'verl-core'",
+    "transformers>=5.3.0,<=5.16.0 ; extra == 'verl-core'",
     "numpy>=2.0.0",
     "kernels>=0.10.2,<0.11",
     "flash-attn-4 ; platform_machine == 'flash-attn-4-excluded'",
@@ -357,6 +374,22 @@ requires-dist = ["torch>=2.6.0", "numpy", "packaging>=24.2"]
 name = "mbridge"
 version = "0.15.1"
 requires-dist = []
+
+# The specialized image supplies the exact Torch 2.13 CUDA/Triton/NCCL runtime.
+# Retain Torch's pure-Python runtime requirements, but keep UV from replacing
+# the image's native CUDA dependency stack alongside the matching Torch wheel.
+[[tool.uv.dependency-metadata]]
+name = "torch"
+version = "2.13.0+cu130"
+requires-dist = [
+    "filelock",
+    "typing-extensions>=4.10.0",
+    "setuptools>=77.0.3",
+    "sympy>=1.13.3",
+    "networkx>=2.5.1",
+    "jinja2",
+    "fsspec>=0.8.5",
+]
 
 # megatron-bridge 0.5.2 comes prebuilt from the wheelhouse (megatron-bridge-r0.5.0
 # tag), pairing with megatron-core 0.18.0. The wheel's real metadata pulls a
@@ -409,16 +442,12 @@ torch = [
     #   { index = "pytorch-cu130", extra = "trtllm" },
 ]
 torchvision = [
-    { index = "pytorch-cu130", extra = "vllm" },
     { index = "pytorch-cu130", extra = "sglang" },
-    { index = "pytorch-cu130", extra = "fsdp" },
     { index = "pytorch-cu130", extra = "megatron" },
     { index = "pytorch-cpu",   extra = "cpu" },
 ]
 torchaudio = [
-    { index = "pytorch-cu130", extra = "vllm" },
     { index = "pytorch-cu130", extra = "sglang" },
-    { index = "pytorch-cu130", extra = "fsdp" },
     { index = "pytorch-cu130", extra = "megatron" },
     { index = "pytorch-cpu",   extra = "cpu" },
 ]

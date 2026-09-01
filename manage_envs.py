@@ -101,17 +101,18 @@ from the baked cache, offline — instead of hard-coding one combo at build
 time. Do **not** use ``prefetch`` as a runtime sync; use ``sync <extras...>``
 for that.
 
-This driver exposes one GPU torch "world" plus a CPU slice, all in one lock:
-the cu13.0 / torch-2.11 backends (vllm, sglang, fsdp, megatron) and the
-GPU-free ``cpu`` slice. They never mix in one ``.venv`` (see the conflict
-sets). On top of whichever one you pick sit the conflict-free *add-ons*
+This driver exposes a specialized-image CUDA 13 / Torch 2.13 pair
+(``vllm + fsdp``), a generic CUDA 13 / Torch 2.11 pair
+(``sglang + megatron``), and the GPU-free ``cpu`` slice. Incompatible worlds
+never mix in one ``.venv`` (see the conflict sets). On top of whichever one you
+pick sit the conflict-free *add-ons*
 (``math``, ``ci``, ``veomni-sft``) — extras that carry no torch of their own,
 so CI composes them freely, e.g.::
 
     python manage_envs.py sync sglang megatron ci
 
-``prefetch`` scopes the cache warm via the ``cu130`` shortcut so the
-Docker image bakes only its backends. DEFERRED (commented out in
+``prefetch`` scopes the cache warm via the ``cu130`` shortcut. The specialized
+image must bake only the ``vllm + fsdp`` pair. DEFERRED (commented out in
 pyproject.toml until they support torch-2.11 / cu130): the cu12.9 /
 torch-2.9.1 world (veomni, nemoautomodel) and trtllm (a CUDA-13 RC sdist).
 
@@ -136,8 +137,10 @@ import sys
 import tempfile
 from pathlib import Path
 
-# Active extras in the universal lock. One GPU torch "world" + a CPU slice:
-#   * cu13.0 / torch 2.11  : vllm, sglang (inference) + fsdp, megatron (training)
+# Active extras in the universal lock. One model-image GPU torch world, one
+# generic GPU world, and a CPU slice:
+#   * cu13.0 / torch 2.13  : vllm + fsdp (specialized image contract)
+#   * cu13.0 / torch 2.11  : sglang + megatron
 #   * cpu   / torch 2.11   : GPU-free CI / unit-test / dev-sanity slice
 # DEFERRED and absent from the active lock: the cu12.9 / torch-2.9.1 world
 # (veomni, nemoautomodel) and trtllm (a CUDA-13 RC). Both stay commented out in
@@ -161,17 +164,16 @@ ADDON_EXTRAS: list[str] = ["math", "ci", "veomni-sft"]
 ALL_EXTRAS: list[str] = INFERENCE_BACKENDS + TRAINING_BACKENDS + CU129_BACKENDS + DEV_BACKENDS + ADDON_EXTRAS
 
 # Mutually exclusive extras — must mirror [tool.uv].conflicts in pyproject.toml.
-# At most one member of each set may be synced into a single .venv. vllm / sglang
-# are competing inference engines; cpu is GPU-free. fsdp / megatron may co-exist
-# with one cu130 inference engine. (The flash-attn-* URL-routing sub-extras also
-# conflict in pyproject.toml, but they are internal and never synced directly,
-# so they are omitted here.)
+# At most one member of each set may be synced into a single .venv. The
+# specialized vllm/fsdp pair shares Torch 2.13, while sglang/megatron remain in
+# the generic Torch 2.11 world. CPU is GPU-free.
 # DEFERRED (cu12.9): re-add "veomni", "nemoautomodel" to every set when the
 # torch-2.9.1 world returns — they pin a different torch, so they conflict with all.
 CONFLICT_SETS: list[set[str]] = [
     {"vllm", "sglang", "cpu"},
-    {"fsdp", "cpu"},
-    {"megatron", "cpu"},
+    {"fsdp", "megatron", "cpu"},
+    {"vllm", "megatron"},
+    {"sglang", "fsdp"},
 ]
 
 # Single interpreter for the whole project (matches [tool.uv].environments,
@@ -186,7 +188,7 @@ GROUPS: dict[str, list[str]] = {
     "addons": ADDON_EXTRAS,
     # CUDA-world shortcuts, used to scope `prefetch` per Docker image so each
     # image bakes only the backends it can actually run on its CUDA base.
-    "cu130": INFERENCE_BACKENDS + TRAINING_BACKENDS,  # torch 2.11 GPU backends
+    "cu130": INFERENCE_BACKENDS + TRAINING_BACKENDS,
     # DEFERRED (cu12.9): "cu129": CU129_BACKENDS,  # torch 2.9.1 GPU backends
 }
 
@@ -629,9 +631,11 @@ def cmd_clean(args: argparse.Namespace) -> int:
 
 def cmd_list(args: argparse.Namespace) -> int:
     """Show available extras, conflict rules, venv state, and prefetch plan."""
-    print("extras (one universal uv.lock; cu130/torch-2.11 + cpu):")
-    print(f"  inference (cu130/torch-2.11) : {', '.join(INFERENCE_BACKENDS)}")
-    print(f"  training  (cu130/torch-2.11) : {', '.join(TRAINING_BACKENDS)}")
+    print("extras (one universal uv.lock; specialized cu130 + generic cu130 + cpu):")
+    print("  specialized image (cu130/torch-2.13): vllm + fsdp")
+    print("  generic image     (cu130/torch-2.11): sglang + megatron")
+    print(f"  inference: {', '.join(INFERENCE_BACKENDS)}")
+    print(f"  training : {', '.join(TRAINING_BACKENDS)}")
     print(f"  dev       (cpu/torch-2.11)   : {', '.join(DEV_BACKENDS)}")
     print(f"  addons    (any combo)        : {', '.join(ADDON_EXTRAS)}")
     print("  cu129     (torch-2.9.1)      : DEFERRED (veomni, nemoautomodel)")
