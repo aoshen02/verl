@@ -450,8 +450,10 @@ class FSDPEngine(BaseEngine):
                 "reshard_after_forward": self.engine_config.reshard_after_forward,
             }
             full_state = module.state_dict()
+            buffers = {name: buffer.detach().cpu() for name, buffer in module.named_buffers() if not buffer.is_meta}
+            module.to_empty(device="meta")
             apply_fsdp2(module, fsdp_kwargs, self.engine_config)
-            fsdp2_load_full_state_dict(module, full_state, fsdp_mesh, offload_policy)
+            fsdp2_load_full_state_dict(module, full_state, fsdp_mesh, offload_policy, buffers)
         else:
             raise NotImplementedError(f"Unknown strategy {self.engine_config.strategy}")
 

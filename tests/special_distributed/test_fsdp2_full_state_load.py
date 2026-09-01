@@ -33,13 +33,8 @@ class BufferedModel(nn.Module):
 
 
 def _build_model(rank: int) -> tuple[BufferedModel, dict[str, torch.Tensor]]:
-    if rank == 0:
-        model = BufferedModel()
-        state = {name: value.detach().clone() for name, value in model.state_dict().items()}
-    else:
-        with torch.device("meta"):
-            model = BufferedModel()
-        state = {}
+    model = BufferedModel()
+    state = model.state_dict() if rank == 0 else {}
     return model, state
 
 
@@ -58,11 +53,13 @@ def main() -> None:
     mesh = init_device_mesh("cuda", (world_size,), mesh_dim_names=("fsdp",))
     model, full_state = _build_model(rank)
     expected = (
-        full_state["block.linear.weight"].to("cuda")
+        full_state["block.linear.weight"].detach().clone().to("cuda")
         if rank == 0
         else torch.empty((4, 4), device="cuda", dtype=torch.float32)
     )
     dist.broadcast(expected, src=0)
+    buffers = {name: buffer.detach().cpu() for name, buffer in model.named_buffers()}
+    model.to_empty(device="meta")
     apply_fsdp2(
         model,
         {
@@ -78,7 +75,7 @@ def main() -> None:
         {"wrap_policy": {"transformer_layer_cls_to_wrap": ["ToyBlock"]}},
     )
     model.to = _forbid_full_model_to
-    fsdp2_load_full_state_dict(model, full_state, mesh)
+    fsdp2_load_full_state_dict(model, full_state, mesh, buffers=buffers)
 
     torch.testing.assert_close(model.block.linear.weight.full_tensor().float(), expected, atol=0.0, rtol=0.0)
     torch.testing.assert_close(model.marker, torch.arange(4, device="cuda", dtype=torch.bfloat16))
