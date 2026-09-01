@@ -7,7 +7,7 @@ set -euo pipefail
 : "${TRAIN_FILE:?set TRAIN_FILE to the frozen smoke train parquet}"
 : "${VAL_FILE:?set VAL_FILE to the frozen smoke validation parquet}"
 : "${OUTPUT_DIR:?set OUTPUT_DIR to a writable checkpoint directory}"
-: "${UV_PROJECT_ENVIRONMENT:?set this to a target-image system-site uv venv}"
+: "${UV_PROJECT_ENVIRONMENT:?set this to the baked specialized-image uv venv}"
 
 NNODES=${NNODES:-1}
 NGPUS_PER_NODE=${NGPUS_PER_NODE:-8}
@@ -42,14 +42,12 @@ if ((EXPECTED_TRAIN_ROWS != TRAIN_BATCH_SIZE * SMOKE_STEPS || EXPECTED_VAL_ROWS 
     exit 2
 fi
 
-# This provisional gate inherits the immutable image runtime through a uv venv
-# created with `uv venv --system-site-packages`. It deliberately never asks uv
-# to install vLLM: the image contains the model-specific build. The final
-# evidence gate will replace this with an upstream-supported frozen uv image.
+# This gate uses the uv environment baked into the specialized image. It never
+# installs vLLM: the image contains the model-specific build.
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 export PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
 export VERL_ALLOW_UNSUPPORTED_VLLM_VERSION=1
-UV_PY=(uv run --frozen --no-sync python3)
+UV_PY=(uv run --active --frozen --no-sync python)
 runtime_versions=$("${UV_PY[@]}" -c '
 import torch
 import transformers
@@ -157,7 +155,11 @@ TRAINER=(
 
 RAY=(
     '+ray_kwargs.ray_init.num_gpus=8'
-    'ray_kwargs.ray_init.runtime_env.py_executable=uv -v run --frozen --no-sync'
+    'ray_kwargs.ray_init.runtime_env.py_executable=uv -v run --active --frozen --no-sync'
+)
+
+HYDRA=(
+    hydra.run.dir=/run/hydra
 )
 
 EXTRA=()
@@ -173,5 +175,6 @@ exec "${UV_PY[@]}" -m verl.trainer.main_ppo \
     "${REF[@]}" \
     "${TRAINER[@]}" \
     "${RAY[@]}" \
+    "${HYDRA[@]}" \
     "${EXTRA[@]}" \
     "$@"
