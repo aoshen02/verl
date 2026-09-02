@@ -175,6 +175,11 @@ RAY=(
     'ray_kwargs.ray_init.runtime_env.py_executable=uv -v run --active --frozen --no-sync'
 )
 
+REWARD=(
+    reward.custom_reward_function.path=${REPO_ROOT}/scripts/qwen_l8_smoke_reward.py
+    reward.custom_reward_function.name=compute_score
+)
+
 HYDRA=(
     hydra.run.dir=/run/hydra
 )
@@ -192,6 +197,7 @@ exec "${UV_PY[@]}" -m verl.trainer.main_ppo \
     "${REF[@]}" \
     "${TRAINER[@]}" \
     "${RAY[@]}" \
+    "${REWARD[@]}" \
     "${HYDRA[@]}" \
     "${EXTRA[@]}" \
     "$@"
