@@ -23,6 +23,7 @@ MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-64}
 PROJECT_NAME=${PROJECT_NAME:-qwen38_l8_rl_smoke}
 EXPERIMENT_NAME=${EXPERIMENT_NAME:-fsdp2_lora_adapter_only}
 ENABLE_MTP=${ENABLE_MTP:-false}
+ENFORCE_EAGER=${ENFORCE_EAGER:-true}
 EXPECTED_VLLM_VERSION=${EXPECTED_VLLM_VERSION:-0.1.dev20073+g8e685d198}
 EXPECTED_TORCH_VERSION=${EXPECTED_TORCH_VERSION:-2.13.0+cu130}
 EXPECTED_TRANSFORMERS_VERSION=${EXPECTED_TRANSFORMERS_VERSION:-5.16.0}
@@ -37,6 +38,10 @@ if ((TRAIN_BATCH_SIZE <= 0 || ROLLOUT_N <= 1 || ROLLOUT_TP <= 0 || SMOKE_STEPS <
 fi
 if [[ "$ENABLE_MTP" != false && "$ENABLE_MTP" != true ]]; then
     echo "ENABLE_MTP must be false or true" >&2
+    exit 2
+fi
+if [[ "$ENFORCE_EAGER" != false && "$ENFORCE_EAGER" != true ]]; then
+    echo "ENFORCE_EAGER must be false or true" >&2
     exit 2
 fi
 if ((NGPUS_PER_NODE % ROLLOUT_TP != 0)); then
@@ -137,6 +142,9 @@ ROLLOUT=(
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=1024
     actor_rollout_ref.rollout.seed=17
     actor_rollout_ref.rollout.full_determinism=False
+    actor_rollout_ref.rollout.enforce_eager=${ENFORCE_EAGER}
+    +actor_rollout_ref.rollout.engine_kwargs.vllm.enable_flashinfer_autotune=False
+    +actor_rollout_ref.rollout.engine_kwargs.vllm.gdn_prefill_backend=triton
     actor_rollout_ref.rollout.checkpoint_engine.backend=naive
 )
 
