@@ -13,7 +13,15 @@ from torch import nn
 from torch.distributed.device_mesh import init_device_mesh
 
 from verl.utils.distributed import initialize_global_process_group
-from verl.utils.fsdp_utils import MixedPrecisionPolicy, apply_fsdp2, fsdp2_load_full_state_dict
+from verl.utils.fsdp_utils import (
+    MixedPrecisionPolicy,
+    apply_fsdp2,
+    fsdp2_load_full_state_dict,
+    get_no_placement_param_registrations,
+    materialize_no_placement_params,
+    set_no_placement_param_registrations,
+    temporarily_detach_no_placement_params,
+)
 
 
 class ToyBlock(nn.Module):
@@ -24,17 +32,32 @@ class ToyBlock(nn.Module):
 
 class BufferedModel(nn.Module):
     _no_split_modules = ["ToyBlock"]
+    _no_placement_params = ["large.weight"]
 
     def __init__(self) -> None:
         super().__init__()
         self.config = SimpleNamespace(tie_word_embeddings=False)
         self.block = ToyBlock()
+        self.large = nn.Embedding(8, 4)
+        self.large.weight.requires_grad_(False)
         self.register_buffer("marker", torch.arange(4, dtype=torch.bfloat16), persistent=False)
 
 
 def _build_model(rank: int) -> tuple[BufferedModel, dict[str, torch.Tensor]]:
     model = BufferedModel()
-    state = model.state_dict() if rank == 0 else {}
+    if rank == 0:
+        model.large.weight.copy_(torch.arange(32, dtype=torch.float32).view(8, 4))
+    else:
+        model.large.weight = nn.Parameter(
+            torch.empty(model.large.weight.shape, device="meta"),
+            requires_grad=False,
+        )
+    registrations = materialize_no_placement_params(
+        get_no_placement_param_registrations(model), cache_scope="distributed-test"
+    )
+    set_no_placement_param_registrations(model, registrations)
+    with temporarily_detach_no_placement_params(model):
+        state = model.state_dict() if rank == 0 else {}
     return model, state
 
 
@@ -59,7 +82,9 @@ def main() -> None:
     )
     dist.broadcast(expected, src=0)
     buffers = {name: buffer.detach().cpu() for name, buffer in model.named_buffers()}
-    model.to_empty(device="meta")
+    registrations = vars(model)["_verl_no_placement_param_registrations"]
+    with temporarily_detach_no_placement_params(model):
+        model.to_empty(device="meta")
     apply_fsdp2(
         model,
         {
@@ -71,14 +96,19 @@ def main() -> None:
             ),
             "offload_policy": None,
             "reshard_after_forward": True,
+            "ignored_params": {param for _, _, param, _ in registrations},
         },
         {"wrap_policy": {"transformer_layer_cls_to_wrap": ["ToyBlock"]}},
     )
     model.to = _forbid_full_model_to
-    fsdp2_load_full_state_dict(model, full_state, mesh, buffers=buffers)
+    with temporarily_detach_no_placement_params(model):
+        fsdp2_load_full_state_dict(model, full_state, mesh, buffers=buffers)
 
     torch.testing.assert_close(model.block.linear.weight.full_tensor().float(), expected, atol=0.0, rtol=0.0)
     torch.testing.assert_close(model.marker, torch.arange(4, device="cuda", dtype=torch.bfloat16))
+    assert model.large.weight.device.type == "cpu"
+    expected_large = torch.arange(32, dtype=torch.float32).view(8, 4)
+    torch.testing.assert_close(model.large.weight, expected_large)
     dist.barrier()
     dist.destroy_process_group()
     if rank == 0:

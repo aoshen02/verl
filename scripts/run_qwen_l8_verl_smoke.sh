@@ -116,6 +116,7 @@ MODEL=(
 
 ACTOR=(
     actor_rollout_ref.actor.strategy=fsdp2
+    actor_rollout_ref.actor.checkpoint.save_lora_only=True
     actor_rollout_ref.actor.fsdp_config.model_dtype=bf16
     actor_rollout_ref.actor.fsdp_config.param_offload=False
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False

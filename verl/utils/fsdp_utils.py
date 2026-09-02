@@ -54,6 +54,136 @@ else:
     fully_shard, MixedPrecisionPolicy, FSDPModule, CPUOffloadPolicy, fully_shard_module = None, None, None, None, None
 
 
+_NO_PLACEMENT_REGISTRATIONS = "_verl_no_placement_param_registrations"
+_NO_PLACEMENT_CACHE = {}
+_NO_PLACEMENT_GLOO_GROUP = None
+
+
+def get_no_placement_param_registrations(model: nn.Module):
+    """Resolve Transformers parameters that must stay on their current device."""
+    patterns = getattr(model, "_no_placement_params", None) or ()
+    if not patterns:
+        return ()
+
+    named_params = list(model.named_parameters(remove_duplicate=False))
+    matched_params = set()
+    missing_patterns = []
+    for pattern in patterns:
+        matches = [
+            param
+            for name, param in named_params
+            if name == pattern or name.endswith(f".{pattern}")
+        ]
+        if not matches:
+            missing_patterns.append(pattern)
+        matched_params.update(matches)
+
+    if missing_patterns:
+        raise ValueError(
+            "Could not resolve _no_placement_params entries: "
+            f"{missing_patterns}"
+        )
+    trainable = [name for name, param in named_params if param in matched_params and param.requires_grad]
+    if trainable:
+        raise ValueError(
+            "FSDP2 cannot train CPU-resident _no_placement_params: "
+            f"{trainable}"
+        )
+
+    registrations = []
+    for module_name, module in model.named_modules():
+        for local_name, param in module._parameters.items():
+            if param in matched_params:
+                full_name = f"{module_name}.{local_name}" if module_name else local_name
+                registrations.append((module, local_name, param, full_name))
+    return tuple(registrations)
+
+
+def set_no_placement_param_registrations(model: nn.Module, registrations) -> None:
+    setattr(model, _NO_PLACEMENT_REGISTRATIONS, tuple(registrations))
+
+
+def materialize_no_placement_params(registrations, cache_scope):
+    """Materialize frozen CPU parameters on every rank from rank 0."""
+    if not registrations:
+        return ()
+
+    by_param = {}
+    for registration in registrations:
+        by_param.setdefault(id(registration[2]), []).append(registration)
+
+    result = []
+    for grouped_registrations in by_param.values():
+        source_param = grouped_registrations[0][2]
+        names = tuple(sorted(registration[3] for registration in grouped_registrations))
+        cache_key = (cache_scope, names, tuple(source_param.shape), source_param.dtype)
+        param = _NO_PLACEMENT_CACHE.get(cache_key)
+        if param is None:
+            if not dist.is_initialized() or dist.get_world_size() == 1:
+                if source_param.is_meta:
+                    raise RuntimeError(
+                        f"Cannot materialize _no_placement_params {names} from meta"
+                    )
+                param = source_param
+            else:
+                if dist.get_rank() == 0:
+                    if source_param.is_meta or source_param.device.type != "cpu":
+                        raise RuntimeError(
+                            f"Rank 0 must own CPU data for _no_placement_params {names}"
+                        )
+                    param = source_param
+                else:
+                    param = nn.Parameter(
+                        torch.empty(
+                            source_param.shape,
+                            dtype=source_param.dtype,
+                            device="cpu",
+                        ),
+                        requires_grad=False,
+                    )
+                if not param.is_contiguous():
+                    raise RuntimeError(
+                        f"_no_placement_params must be contiguous: {names}"
+                    )
+                global _NO_PLACEMENT_GLOO_GROUP
+                if _NO_PLACEMENT_GLOO_GROUP is None:
+                    _NO_PLACEMENT_GLOO_GROUP = dist.new_group(backend="gloo")
+                flat = param.detach().view(-1)
+                chunk_size = max(1, (256 * 1024**2) // flat.element_size())
+                for offset in range(0, flat.numel(), chunk_size):
+                    dist.broadcast(
+                        flat[offset : offset + chunk_size],
+                        src=0,
+                        group=_NO_PLACEMENT_GLOO_GROUP,
+                    )
+            _NO_PLACEMENT_CACHE[cache_key] = param
+
+        for module, name, _, full_name in grouped_registrations:
+            module._parameters[name] = param
+            result.append((module, name, param, full_name))
+    return tuple(result)
+
+
+@contextmanager
+def temporarily_detach_no_placement_params(model: nn.Module, registrations=None):
+    """Keep CPU-resident parameters out of recursive ``Module.to`` calls."""
+    if registrations is None:
+        registrations = vars(model).get(_NO_PLACEMENT_REGISTRATIONS, ())
+    if not registrations:
+        yield
+        return
+
+    for module, name, param, full_name in registrations:
+        if module._parameters.get(name) is not param:
+            raise RuntimeError(f"Unexpected parameter registration for {full_name}")
+        module._parameters[name] = None
+    try:
+        yield
+    finally:
+        for module, name, param, _ in registrations:
+            module._parameters[name] = param
+
+
 def init_fn(x: torch.nn.Module):
     if torch.distributed.get_rank() != 0:
         x = x.to_empty(device=get_device_id(), recurse=False)
@@ -206,7 +336,8 @@ def offload_fsdp2_model_to_cpu(model, empty_cache: bool = True):
     # host must synchronize first, and a caller that reloads them on another
     # stream must establish an explicit stream dependency. empty_cache() below
     # is not a synchronization point.
-    model.to("cpu", non_blocking=True)
+    with temporarily_detach_no_placement_params(model):
+        model.to("cpu", non_blocking=True)
     if empty_cache:
         get_torch_device().empty_cache()
 
@@ -234,7 +365,8 @@ def load_fsdp_model_to_gpu(model: FSDP):
 @torch.no_grad()
 def load_fsdp2_model_to_gpu(model):
     device = get_device_id()
-    model.to(device, non_blocking=True)
+    with temporarily_detach_no_placement_params(model):
+        model.to(device, non_blocking=True)
 
 
 @torch.no_grad()
@@ -599,6 +731,12 @@ def apply_fsdp2(model, fsdp_kwargs, config):
     assert len(fsdp_transformer_layer_cls_to_wrap) > 0 and fsdp_transformer_layer_cls_to_wrap[0] is not None
 
     modules = _select_fsdp2_wrap_targets(model, fsdp_transformer_layer_cls_to_wrap)
+    ignored_params = fsdp_kwargs.get("ignored_params") or set()
+    modules = [
+        module
+        for module in modules
+        if any(param not in ignored_params for param in module.parameters())
+    ]
 
     for idx, module in enumerate(modules):
         # if torch.distributed.is_initialized() and torch.distributed.get_rank() == 0:
