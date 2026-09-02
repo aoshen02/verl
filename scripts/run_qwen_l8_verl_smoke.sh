@@ -171,7 +171,7 @@ TRAINER=(
 )
 
 RAY=(
-    'ray_kwargs.ray_init.num_cpus=32'
+    'ray_kwargs.ray_init.num_cpus=48'
     '+ray_kwargs.ray_init.num_gpus=8'
     'ray_kwargs.ray_init.runtime_env.py_executable=uv -v run --active --frozen --no-sync'
 )
