@@ -29,6 +29,7 @@ exec enroot start --rc "$WORKTREE/scripts/enroot_exec.sh" \
     -e TRAIN_MODEL_PATH=/models/q0 \
     -e ROLLOUT_MODEL_PATH=/models/qwen38 \
     -e ENABLE_MTP="${ENABLE_MTP:-false}" \
+    -e ENFORCE_EAGER="${ENFORCE_EAGER:-true}" \
     -e TRAIN_FILE=/opt/data/train.parquet \
     -e VAL_FILE=/opt/data/val.parquet \
     -e OUTPUT_DIR=/run/output \
