@@ -56,6 +56,24 @@ class _FakeTokenizer:
             json.dump({"version": "1.0"}, f)
 
 
+def test_auto_model_class_uses_lora_task_when_architecture_is_missing(tmp_path):
+    (tmp_path / "lora_train_meta.json").write_text(json.dumps({"task_type": "CAUSAL_LM"}), encoding="utf-8")
+    merger = _TestModelMerger.__new__(_TestModelMerger)
+    merger.config = SimpleNamespace(local_dir=tmp_path)
+    merger.model_config = SimpleNamespace(architectures=None)
+
+    assert merger.get_transformers_auto_model_class() is AutoModelForCausalLM
+
+
+def test_auto_model_class_rejects_missing_architecture_without_task(tmp_path):
+    merger = _TestModelMerger.__new__(_TestModelMerger)
+    merger.config = SimpleNamespace(local_dir=tmp_path)
+    merger.model_config = SimpleNamespace(architectures=None)
+
+    with pytest.raises(NotImplementedError, match="architectures is missing"):
+        merger.get_transformers_auto_model_class()
+
+
 def test_save_rejects_tokenizer_only_output(monkeypatch, tmp_path):
     merger = _TestModelMerger.__new__(_TestModelMerger)
     merger.config = SimpleNamespace(target_dir=tmp_path, trust_remote_code=False, local_dir=None)

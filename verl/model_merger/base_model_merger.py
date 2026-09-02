@@ -204,13 +204,22 @@ class BaseModelMerger(ABC):
         )
 
     def get_transformers_auto_model_class(self):
+        architectures = self.model_config.architectures or []
+        if not architectures:
+            lora_meta = self._load_lora_train_meta() or {}
+            if lora_meta.get("task_type") == "CAUSAL_LM":
+                return AutoModelForCausalLM
+            raise NotImplementedError(
+                "Cannot infer the Transformers auto model class because "
+                "architectures is missing and no supported LoRA task_type is set."
+            )
+
+        architecture = architectures[0]
         has_remote_code = hasattr(self.model_config, "auto_map") and any(
-            self.model_config.architectures[0] in val for val in self.model_config.auto_map.values()
+            architecture in val for val in self.model_config.auto_map.values()
         )
         if has_remote_code:
-            auto_class = next(
-                k for k, v in self.model_config.auto_map.items() if self.model_config.architectures[0] in v
-            )
+            auto_class = next(k for k, v in self.model_config.auto_map.items() if architecture in v)
             match auto_class:
                 case "AutoModelForCausalLM":
                     return AutoModelForCausalLM
@@ -223,11 +232,11 @@ class BaseModelMerger(ABC):
                 case _:
                     raise NotImplementedError(f"Unknown auto class {auto_class}")
         else:
-            if "ForTokenClassification" in self.model_config.architectures[0]:
+            if "ForTokenClassification" in architecture:
                 return AutoModelForTokenClassification
-            elif "ForCausalLM" in self.model_config.architectures[0]:
+            elif "ForCausalLM" in architecture:
                 return AutoModelForCausalLM
-            elif "ForConditionalGeneration" in self.model_config.architectures[0]:
+            elif "ForConditionalGeneration" in architecture:
                 return AutoModelForVision2Seq
 
             raise NotImplementedError(f"Unknown architecture {self.model_config.architectures}")
