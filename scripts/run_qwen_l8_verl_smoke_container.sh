@@ -32,6 +32,7 @@ exec enroot start --rc "$WORKTREE/scripts/enroot_exec.sh" \
     -e TRAIN_FILE=/opt/data/train.parquet \
     -e VAL_FILE=/opt/data/val.parquet \
     -e OUTPUT_DIR=/run/output \
+    -e VERL_FILE_LOGGER_ROOT=/run/output \
     -m "$WORKTREE:/workspace:none:bind,ro" \
     -m "$TRAIN_MODEL:/models/q0:none:bind,ro" \
     -m "$ROLLOUT_MODEL:/models/qwen38:none:bind,ro" \
