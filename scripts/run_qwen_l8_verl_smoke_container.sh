@@ -20,6 +20,7 @@ exec enroot start --rc "$WORKTREE/scripts/enroot_exec.sh" \
     -e UV_PROJECT_ENVIRONMENT=/opt/verl-uv-final \
     -e UV_CACHE_DIR=/tmp/uv-cache \
     -e XDG_CACHE_HOME=/run/xdg-cache \
+    -e FLASHINFER_WORKSPACE_BASE=/run \
     -e TRITON_CACHE_DIR=/run/triton-cache \
     -e DRY_RUN="${DRY_RUN:-0}" \
     -e PYTHONDONTWRITEBYTECODE=1 \
