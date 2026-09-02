@@ -136,7 +136,7 @@ ROLLOUT=(
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=1024
     actor_rollout_ref.rollout.seed=17
-    actor_rollout_ref.rollout.full_determinism=True
+    actor_rollout_ref.rollout.full_determinism=False
     actor_rollout_ref.rollout.checkpoint_engine.backend=naive
 )
 
