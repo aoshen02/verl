@@ -18,6 +18,7 @@ RUN_DIR=${RUN_DIR:?set a writable h200-0 result directory}
 RAY_PORT=${RAY_PORT:-6379}
 NETWORK_INTERFACE=${NETWORK_INTERFACE:-ens7}
 TRITON_CACHE_ROOT=${TRITON_CACHE_ROOT:-/mnt/ephemeral/aoshen/qwen38/cache/triton}
+RAY_MEMORY_USAGE_THRESHOLD=${RAY_MEMORY_USAGE_THRESHOLD:-0.98}
 
 allocation_nodes=$(scontrol show job -o "$SLURM_JOB_ID" |
     sed -n 's/.* NodeList=\([^ ]*\).*/\1/p')
@@ -55,6 +56,7 @@ ray_container=(
     -e VLLM_DO_NOT_TRACK=1
     -e PYTHONPATH=/workspace
     -e VERL_ALLOW_UNSUPPORTED_VLLM_VERSION=1
+    -e "RAY_memory_usage_threshold=$RAY_MEMORY_USAGE_THRESHOLD"
     -e FLASHINFER_WORKSPACE_BASE=/run/flashinfer
     -e "GLOO_SOCKET_IFNAME=$NETWORK_INTERFACE"
     -e "NCCL_SOCKET_IFNAME=$NETWORK_INTERFACE"
