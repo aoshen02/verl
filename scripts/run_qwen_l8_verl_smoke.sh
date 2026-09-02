@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Four-step FSDP2 + merged-LoRA + vLLM rollout gate for the verified L8 checkpoint.
+# FSDP2 LoRA + FP8 vLLM adapter-update gate for the verified L8 checkpoint.
 
 set -euo pipefail
 
-: "${MODEL_PATH:?set MODEL_PATH to the derived L8 BF16 trainer checkpoint}"
+: "${TRAIN_MODEL_PATH:?set TRAIN_MODEL_PATH to the derived L8 BF16 trainer checkpoint}"
+: "${ROLLOUT_MODEL_PATH:?set ROLLOUT_MODEL_PATH to the matching L8 FP8 serving checkpoint}"
 : "${TRAIN_FILE:?set TRAIN_FILE to the frozen smoke train parquet}"
 : "${VAL_FILE:?set VAL_FILE to the frozen smoke validation parquet}"
 : "${OUTPUT_DIR:?set OUTPUT_DIR to a writable checkpoint directory}"
@@ -20,7 +21,8 @@ EXPECTED_VAL_ROWS=${EXPECTED_VAL_ROWS:-8}
 MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-512}
 MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-64}
 PROJECT_NAME=${PROJECT_NAME:-qwen38_l8_rl_smoke}
-EXPERIMENT_NAME=${EXPERIMENT_NAME:-fsdp2_lora_merge_mtp}
+EXPERIMENT_NAME=${EXPERIMENT_NAME:-fsdp2_lora_adapter_only}
+ENABLE_MTP=${ENABLE_MTP:-false}
 EXPECTED_VLLM_VERSION=${EXPECTED_VLLM_VERSION:-0.1.dev20073+g8e685d198}
 EXPECTED_TORCH_VERSION=${EXPECTED_TORCH_VERSION:-2.13.0+cu130}
 EXPECTED_TRANSFORMERS_VERSION=${EXPECTED_TRANSFORMERS_VERSION:-5.16.0}
@@ -31,6 +33,10 @@ if ((NNODES != 1 || NGPUS_PER_NODE != 8)); then
 fi
 if ((TRAIN_BATCH_SIZE <= 0 || ROLLOUT_N <= 1 || ROLLOUT_TP <= 0 || SMOKE_STEPS <= 0)); then
     echo "batch size, rollout count, TP, and smoke steps must be positive; rollout count must exceed one" >&2
+    exit 2
+fi
+if [[ "$ENABLE_MTP" != false && "$ENABLE_MTP" != true ]]; then
+    echo "ENABLE_MTP must be false or true" >&2
     exit 2
 fi
 if ((NGPUS_PER_NODE % ROLLOUT_TP != 0)); then
@@ -85,17 +91,17 @@ DATA=(
 )
 
 MODEL=(
-    actor_rollout_ref.model.path=${MODEL_PATH}
+    actor_rollout_ref.model.path=${TRAIN_MODEL_PATH}
     actor_rollout_ref.model.trust_remote_code=True
     actor_rollout_ref.model.use_remove_padding=True
     actor_rollout_ref.model.enable_gradient_checkpointing=True
     actor_rollout_ref.model.lora_rank=8
     actor_rollout_ref.model.lora_alpha=16
     'actor_rollout_ref.model.target_modules=[q_proj,k_proj,v_proj,o_proj,in_proj_a,in_proj_b,in_proj_qkv,in_proj_z,out_proj]'
-    actor_rollout_ref.model.lora.merge=True
-    actor_rollout_ref.model.mtp.enable=True
+    actor_rollout_ref.model.lora.merge=False
+    actor_rollout_ref.model.mtp.enable=${ENABLE_MTP}
     actor_rollout_ref.model.mtp.enable_train=False
-    actor_rollout_ref.model.mtp.enable_rollout=True
+    actor_rollout_ref.model.mtp.enable_rollout=${ENABLE_MTP}
     actor_rollout_ref.model.mtp.method=mtp
     actor_rollout_ref.model.mtp.num_speculative_tokens=3
 )
@@ -116,6 +122,7 @@ ACTOR=(
 
 ROLLOUT=(
     actor_rollout_ref.rollout.name=vllm
+    actor_rollout_ref.rollout.model_path=${ROLLOUT_MODEL_PATH}
     actor_rollout_ref.rollout.tensor_model_parallel_size=${ROLLOUT_TP}
     actor_rollout_ref.rollout.gpu_memory_utilization=0.5
     actor_rollout_ref.rollout.load_format=safetensors
