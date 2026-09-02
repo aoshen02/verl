@@ -89,6 +89,7 @@ DATA=(
     data.train_files="['${TRAIN_FILE}']"
     data.val_files="['${VAL_FILE}']"
     data.train_batch_size=${TRAIN_BATCH_SIZE}
+    data.dataloader_num_workers=0
     data.max_prompt_length=${MAX_PROMPT_LENGTH}
     data.max_response_length=${MAX_RESPONSE_LENGTH}
     data.filter_overlong_prompts=True
