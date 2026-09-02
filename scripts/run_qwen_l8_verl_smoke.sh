@@ -159,7 +159,7 @@ REF=(
 )
 
 TRAINER=(
-    trainer.logger='["console","file"]'
+    trainer.logger='["console"]'
     trainer.project_name=${PROJECT_NAME}
     trainer.experiment_name=${EXPERIMENT_NAME}
     trainer.n_gpus_per_node=${NGPUS_PER_NODE}
