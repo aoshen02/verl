@@ -28,10 +28,11 @@ EXPECTED_VLLM_VERSION=${EXPECTED_VLLM_VERSION:-0.1.dev20073+g8e685d198}
 EXPECTED_TORCH_VERSION=${EXPECTED_TORCH_VERSION:-2.13.0+cu130}
 EXPECTED_TRANSFORMERS_VERSION=${EXPECTED_TRANSFORMERS_VERSION:-5.16.0}
 
-if ((NNODES != 1 || NGPUS_PER_NODE != 8)); then
-    echo "the L8 smoke is fixed to one eight-GPU node" >&2
+if ((NNODES <= 0 || NGPUS_PER_NODE <= 0)); then
+    echo "NNODES and NGPUS_PER_NODE must be positive" >&2
     exit 2
 fi
+TOTAL_GPUS=$((NNODES * NGPUS_PER_NODE))
 if ((TRAIN_BATCH_SIZE <= 0 || ROLLOUT_N <= 1 || ROLLOUT_TP <= 0 || SMOKE_STEPS <= 0)); then
     echo "batch size, rollout count, TP, and smoke steps must be positive; rollout count must exceed one" >&2
     exit 2
@@ -44,8 +45,8 @@ if [[ "$ENFORCE_EAGER" != false && "$ENFORCE_EAGER" != true ]]; then
     echo "ENFORCE_EAGER must be false or true" >&2
     exit 2
 fi
-if ((NGPUS_PER_NODE % ROLLOUT_TP != 0)); then
-    echo "NGPUS_PER_NODE must be divisible by ROLLOUT_TP" >&2
+if ((TOTAL_GPUS % ROLLOUT_TP != 0)); then
+    echo "total GPUs must be divisible by ROLLOUT_TP" >&2
     exit 2
 fi
 if ((EXPECTED_TRAIN_ROWS != TRAIN_BATCH_SIZE * SMOKE_STEPS || EXPECTED_VAL_ROWS <= 0)); then
@@ -171,10 +172,16 @@ TRAINER=(
 )
 
 RAY=(
-    'ray_kwargs.ray_init.num_cpus=48'
-    '+ray_kwargs.ray_init.num_gpus=8'
-    'ray_kwargs.ray_init.runtime_env.py_executable=uv -v run --active --frozen --no-sync'
+    'ray_kwargs.ray_init.runtime_env.py_executable=/opt/verl-uv-final/bin/python'
 )
+if [[ -n "${RAY_ADDRESS:-}" ]]; then
+    RAY+=("+ray_kwargs.ray_init.address=${RAY_ADDRESS}")
+else
+    RAY+=(
+        'ray_kwargs.ray_init.num_cpus=48'
+        "+ray_kwargs.ray_init.num_gpus=${TOTAL_GPUS}"
+    )
+fi
 
 REWARD=(
     reward.custom_reward_function.path=${REPO_ROOT}/scripts/qwen_l8_smoke_reward.py
