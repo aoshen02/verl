@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# FSDP2 LoRA + FP8 vLLM adapter-update gate for the verified L8 checkpoint.
+# FSDP2 LoRA + FP8 vLLM adapter-update recipe.
 
 set -euo pipefail
 
@@ -15,11 +15,24 @@ NGPUS_PER_NODE=${NGPUS_PER_NODE:-8}
 TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-8}
 ROLLOUT_N=${ROLLOUT_N:-2}
 ROLLOUT_TP=${ROLLOUT_TP:-2}
-SMOKE_STEPS=${SMOKE_STEPS:-4}
-EXPECTED_TRAIN_ROWS=${EXPECTED_TRAIN_ROWS:-32}
-EXPECTED_VAL_ROWS=${EXPECTED_VAL_ROWS:-8}
+TRAINING_STEPS=${TRAINING_STEPS:-${SMOKE_STEPS:-4}}
+EXPECTED_TRAIN_ROWS=${EXPECTED_TRAIN_ROWS:-}
+EXPECTED_VAL_ROWS=${EXPECTED_VAL_ROWS:-}
 MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-512}
 MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-64}
+MAX_MODEL_LEN=${MAX_MODEL_LEN:-1024}
+MAX_NUM_BATCHED_TOKENS=${MAX_NUM_BATCHED_TOKENS:-1024}
+LORA_RANK=${LORA_RANK:-8}
+LORA_ALPHA=${LORA_ALPHA:-16}
+LEARNING_RATE=${LEARNING_RATE:-1e-5}
+PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE:-$TRAIN_BATCH_SIZE}
+USE_KL_LOSS=${USE_KL_LOSS:-true}
+KL_LOSS_COEF=${KL_LOSS_COEF:-0.001}
+SAVE_FREQ=${SAVE_FREQ:-$TRAINING_STEPS}
+TEST_FREQ=${TEST_FREQ:-$TRAINING_STEPS}
+REWARD_MODE=${REWARD_MODE:-math_dapo}
+VAL_BEFORE_TRAIN=${VAL_BEFORE_TRAIN:-false}
+RESUME_MODE=${RESUME_MODE:-disable}
 PROJECT_NAME=${PROJECT_NAME:-qwen38_l8_rl_smoke}
 EXPERIMENT_NAME=${EXPERIMENT_NAME:-fsdp2_lora_adapter_only}
 ENABLE_MTP=${ENABLE_MTP:-false}
@@ -33,8 +46,8 @@ if ((NNODES <= 0 || NGPUS_PER_NODE <= 0)); then
     exit 2
 fi
 TOTAL_GPUS=$((NNODES * NGPUS_PER_NODE))
-if ((TRAIN_BATCH_SIZE <= 0 || ROLLOUT_N <= 1 || ROLLOUT_TP <= 0 || SMOKE_STEPS <= 0)); then
-    echo "batch size, rollout count, TP, and smoke steps must be positive; rollout count must exceed one" >&2
+if ((TRAIN_BATCH_SIZE <= 0 || ROLLOUT_N <= 1 || ROLLOUT_TP <= 0 || TRAINING_STEPS <= 0)); then
+    echo "batch size, rollout count, TP, and training steps must be positive; rollout count must exceed one" >&2
     exit 2
 fi
 if [[ "$ENABLE_MTP" != false && "$ENABLE_MTP" != true ]]; then
@@ -45,12 +58,36 @@ if [[ "$ENFORCE_EAGER" != false && "$ENFORCE_EAGER" != true ]]; then
     echo "ENFORCE_EAGER must be false or true" >&2
     exit 2
 fi
+if [[ "$USE_KL_LOSS" != false && "$USE_KL_LOSS" != true ]]; then
+    echo "USE_KL_LOSS must be false or true" >&2
+    exit 2
+fi
 if ((TOTAL_GPUS % ROLLOUT_TP != 0)); then
     echo "total GPUs must be divisible by ROLLOUT_TP" >&2
     exit 2
 fi
-if ((EXPECTED_TRAIN_ROWS != TRAIN_BATCH_SIZE * SMOKE_STEPS || EXPECTED_VAL_ROWS <= 0)); then
-    echo "expected train rows must equal TRAIN_BATCH_SIZE * SMOKE_STEPS and expected val rows must be positive" >&2
+if ((MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH > MAX_MODEL_LEN)); then
+    echo "prompt plus response length exceeds MAX_MODEL_LEN" >&2
+    exit 2
+fi
+if ((SAVE_FREQ <= 0 || TEST_FREQ <= 0 || LORA_RANK <= 0 || LORA_ALPHA <= 0)); then
+    echo "save/test frequency and LoRA rank/alpha must be positive" >&2
+    exit 2
+fi
+if ((PPO_MINI_BATCH_SIZE <= 0 || PPO_MINI_BATCH_SIZE > TRAIN_BATCH_SIZE)); then
+    echo "PPO_MINI_BATCH_SIZE must be in [1, TRAIN_BATCH_SIZE]" >&2
+    exit 2
+fi
+if [[ "$REWARD_MODE" != math_dapo && "$REWARD_MODE" != smoke ]]; then
+    echo "REWARD_MODE must be math_dapo or smoke" >&2
+    exit 2
+fi
+if [[ "$VAL_BEFORE_TRAIN" != false && "$VAL_BEFORE_TRAIN" != true ]]; then
+    echo "VAL_BEFORE_TRAIN must be false or true" >&2
+    exit 2
+fi
+if [[ "$RESUME_MODE" != auto && "$RESUME_MODE" != disable ]]; then
+    echo "RESUME_MODE must be auto or disable" >&2
     exit 2
 fi
 
@@ -79,8 +116,12 @@ if [ "${runtime_lines[0]}" != "$EXPECTED_VLLM_VERSION" ] || \
 fi
 train_rows=$("${UV_PY[@]}" -c 'import pyarrow.parquet as p, sys; print(p.ParquetFile(sys.argv[1]).metadata.num_rows)' "$TRAIN_FILE")
 val_rows=$("${UV_PY[@]}" -c 'import pyarrow.parquet as p, sys; print(p.ParquetFile(sys.argv[1]).metadata.num_rows)' "$VAL_FILE")
-if [ "$train_rows" != "$EXPECTED_TRAIN_ROWS" ] || [ "$val_rows" != "$EXPECTED_VAL_ROWS" ]; then
-    echo "smoke parquet cardinality differs: train=$train_rows/$EXPECTED_TRAIN_ROWS val=$val_rows/$EXPECTED_VAL_ROWS" >&2
+if [[ -n "$EXPECTED_TRAIN_ROWS" && "$train_rows" != "$EXPECTED_TRAIN_ROWS" ]]; then
+    echo "train parquet cardinality differs: train=$train_rows/$EXPECTED_TRAIN_ROWS" >&2
+    exit 2
+fi
+if [[ -n "$EXPECTED_VAL_ROWS" && "$val_rows" != "$EXPECTED_VAL_ROWS" ]]; then
+    echo "validation parquet cardinality differs: val=$val_rows/$EXPECTED_VAL_ROWS" >&2
     exit 2
 fi
 
@@ -103,8 +144,8 @@ MODEL=(
     +actor_rollout_ref.model.override_config.attn_implementation=sdpa
     actor_rollout_ref.model.use_remove_padding=False
     actor_rollout_ref.model.enable_gradient_checkpointing=True
-    actor_rollout_ref.model.lora_rank=8
-    actor_rollout_ref.model.lora_alpha=16
+    actor_rollout_ref.model.lora_rank=${LORA_RANK}
+    actor_rollout_ref.model.lora_alpha=${LORA_ALPHA}
     'actor_rollout_ref.model.target_modules=[q_proj,k_proj,v_proj,o_proj,in_proj_a,in_proj_b,in_proj_qkv,in_proj_z,out_proj]'
     actor_rollout_ref.model.lora.merge=False
     actor_rollout_ref.model.mtp.enable=${ENABLE_MTP}
@@ -120,12 +161,12 @@ ACTOR=(
     actor_rollout_ref.actor.fsdp_config.model_dtype=bf16
     actor_rollout_ref.actor.fsdp_config.param_offload=False
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False
-    actor_rollout_ref.actor.optim.lr=1e-5
-    actor_rollout_ref.actor.ppo_mini_batch_size=${TRAIN_BATCH_SIZE}
+    actor_rollout_ref.actor.optim.lr=${LEARNING_RATE}
+    actor_rollout_ref.actor.ppo_mini_batch_size=${PPO_MINI_BATCH_SIZE}
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1
     actor_rollout_ref.actor.use_dynamic_bsz=False
-    actor_rollout_ref.actor.use_kl_loss=True
-    actor_rollout_ref.actor.kl_loss_coef=0.001
+    actor_rollout_ref.actor.use_kl_loss=${USE_KL_LOSS}
+    actor_rollout_ref.actor.kl_loss_coef=${KL_LOSS_COEF}
     actor_rollout_ref.actor.kl_loss_type=low_var_kl
 )
 
@@ -139,8 +180,8 @@ ROLLOUT=(
     +actor_rollout_ref.rollout.enable_sleep_mode=True
     actor_rollout_ref.rollout.layered_summon=True
     actor_rollout_ref.rollout.n=${ROLLOUT_N}
-    actor_rollout_ref.rollout.max_model_len=1024
-    actor_rollout_ref.rollout.max_num_batched_tokens=1024
+    actor_rollout_ref.rollout.max_model_len=${MAX_MODEL_LEN}
+    actor_rollout_ref.rollout.max_num_batched_tokens=${MAX_NUM_BATCHED_TOKENS}
     actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=False
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1
     actor_rollout_ref.rollout.seed=17
@@ -166,9 +207,11 @@ TRAINER=(
     trainer.n_gpus_per_node=${NGPUS_PER_NODE}
     trainer.nnodes=${NNODES}
     trainer.total_epochs=1
-    trainer.val_before_train=False
-    trainer.save_freq=${SMOKE_STEPS}
-    trainer.test_freq=${SMOKE_STEPS}
+    trainer.total_training_steps=${TRAINING_STEPS}
+    trainer.val_before_train=${VAL_BEFORE_TRAIN}
+    trainer.resume_mode=${RESUME_MODE}
+    trainer.save_freq=${SAVE_FREQ}
+    trainer.test_freq=${TEST_FREQ}
     trainer.default_local_dir=${OUTPUT_DIR}
 )
 
@@ -184,10 +227,13 @@ else
     )
 fi
 
-REWARD=(
-    reward.custom_reward_function.path=${REPO_ROOT}/scripts/qwen_l8_smoke_reward.py
-    reward.custom_reward_function.name=compute_score
-)
+REWARD=()
+if [[ "$REWARD_MODE" == smoke ]]; then
+    REWARD=(
+        reward.custom_reward_function.path=${REPO_ROOT}/scripts/qwen_l8_smoke_reward.py
+        reward.custom_reward_function.name=compute_score
+    )
+fi
 
 HYDRA=(
     hydra.run.dir=/run/hydra

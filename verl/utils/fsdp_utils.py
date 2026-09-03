@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import functools
+import inspect
 import itertools
 import json
 import logging
@@ -104,9 +105,17 @@ def set_no_placement_param_registrations(model: nn.Module, registrations) -> Non
 
 
 def materialize_no_placement_params(registrations, cache_scope):
-    """Materialize frozen CPU parameters on every rank from rank 0."""
+    """Materialize and share immutable CPU parameters on every rank."""
     if not registrations:
         return ()
+
+    global _NO_PLACEMENT_GLOO_GROUP
+    if (
+        dist.is_initialized()
+        and dist.get_world_size() > 1
+        and _NO_PLACEMENT_GLOO_GROUP is None
+    ):
+        _NO_PLACEMENT_GLOO_GROUP = dist.new_group(backend="gloo")
 
     by_param = {}
     for registration in registrations:
@@ -145,9 +154,6 @@ def materialize_no_placement_params(registrations, cache_scope):
                     raise RuntimeError(
                         f"_no_placement_params must be contiguous: {names}"
                     )
-                global _NO_PLACEMENT_GLOO_GROUP
-                if _NO_PLACEMENT_GLOO_GROUP is None:
-                    _NO_PLACEMENT_GLOO_GROUP = dist.new_group(backend="gloo")
                 flat = param.detach().view(-1)
                 chunk_size = max(1, (256 * 1024**2) // flat.element_size())
                 for offset in range(0, flat.numel(), chunk_size):
@@ -640,6 +646,12 @@ def fsdp2_load_full_state_dict(
         # use torch 2.7.0 copy from verl/third_party/torch/distributed/checkpoint
         from verl.third_party.torch.distributed.checkpoint.state_dict import StateDictOptions, set_model_state_dict
 
+    if not dist.is_initialized() or dist.get_rank() == 0:
+        missing = set(model.state_dict()) - set(full_state)
+        if missing:
+            preview = sorted(missing)[:10]
+            raise ValueError(f"Full state dict is missing model entries: {preview}")
+
     if buffers is None:
         buffers = {name: buffer.detach().cpu() for name, buffer in model.named_buffers() if not buffer.is_meta}
     model = model.to_empty(device=get_device_id())
@@ -707,7 +719,7 @@ def _select_fsdp2_wrap_targets(model, fsdp_transformer_layer_cls_to_wrap):
             or (leaf_name in _wrap_by_name and hasattr(module, "weight"))
         )
         if is_wrap_target and not any(
-            not parent_name or name.startswith(f"{parent_name}.") for parent_name in module_names
+            name.startswith(f"{parent_name}.") for parent_name in module_names
         ):
             modules.append(module)
             module_names.append(name)
@@ -732,11 +744,16 @@ def apply_fsdp2(model, fsdp_kwargs, config):
 
     modules = _select_fsdp2_wrap_targets(model, fsdp_transformer_layer_cls_to_wrap)
     ignored_params = fsdp_kwargs.get("ignored_params") or set()
-    modules = [
-        module
-        for module in modules
-        if any(param not in ignored_params for param in module.parameters())
-    ]
+    if ignored_params:
+        if "ignored_params" not in inspect.signature(fully_shard).parameters:
+            raise RuntimeError(
+                "This PyTorch fully_shard API does not support ignored_params"
+            )
+        modules = [
+            module
+            for module in modules
+            if any(param not in ignored_params for param in module.parameters())
+        ]
 
     for idx, module in enumerate(modules):
         # if torch.distributed.is_initialized() and torch.distributed.get_rank() == 0:

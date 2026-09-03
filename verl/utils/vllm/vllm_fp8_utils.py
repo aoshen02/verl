@@ -430,7 +430,12 @@ def _uses_refactored_fp8_post_load(vllm_version):
     if vllm_version >= version.parse("0.20.0"):
         return True
 
-    fp8_utils = importlib.import_module("vllm.model_executor.layers.quantization.utils.fp8_utils")
+    try:
+        fp8_utils = importlib.import_module(
+            "vllm.model_executor.layers.quantization.utils.fp8_utils"
+        )
+    except ModuleNotFoundError:
+        return True
     return not hasattr(fp8_utils, "maybe_post_process_fp8_weight_block")
 
 

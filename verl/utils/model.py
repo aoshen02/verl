@@ -702,7 +702,8 @@ def get_hf_auto_model_class(hf_config):
     if type(hf_config) in AutoModelForImageTextToText._model_mapping.keys():
         if (
             getattr(hf_config, "model_type", None) == "qwen4_exp"
-            and architecture == "Qwen4ExpForCausalLM"
+            and architecture
+            and architecture.endswith("ForCausalLM")
         ):
             return AutoModelForCausalLM
         return AutoModelForImageTextToText

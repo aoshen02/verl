@@ -63,6 +63,62 @@ ray_container=(
     -m "$WORKTREE:/workspace:none:bind,ro"
 )
 
+verify_lineage() {
+    local node=$1 train_model=$2 output=$3
+    srun --overlap --nodes=1 --ntasks=1 -w "$node" \
+        "${ray_container[@]}" \
+        -m "$train_model:/models/q0:none:bind,ro" \
+        -m "$ROLLOUT_MODEL:/models/qwen38:none:bind,ro" \
+        "$IMAGE" /opt/verl-uv-final/bin/python \
+        /workspace/scripts/verify_fp8_trainer_lineage.py \
+        --trainer /models/q0 --rollout /models/qwen38 >"$output"
+}
+
+verify_lineage "$HEAD_NODE" "$TRAIN_MODEL_HEAD" "$RUN_DIR/lineage-head.json"
+verify_lineage "$WORKER_NODE" "$TRAIN_MODEL_WORKER" "$RUN_DIR/lineage-worker.json"
+cmp "$RUN_DIR/lineage-head.json" "$RUN_DIR/lineage-worker.json"
+
+read_checkpoint_iteration() {
+    local node=$1 output_dir=$2
+    srun --overlap --nodes=1 --ntasks=1 -w "$node" /bin/sh -c \
+        'test ! -f "$1/latest_checkpointed_iteration.txt" || cat "$1/latest_checkpointed_iteration.txt"' \
+        sh "$output_dir"
+}
+
+copy_checkpoint_metadata() {
+    local source_node=$1 source_output=$2 target_node=$3 target_output=$4 iteration=$5
+    srun --overlap --nodes=1 --ntasks=1 -w "$target_node" /bin/sh -c \
+        'test -d "$1/global_step_$2/actor"' sh "$target_output" "$iteration"
+    srun --overlap --nodes=1 --ntasks=1 -w "$source_node" \
+        cat "$source_output/global_step_$iteration/data.pt" |
+        srun --overlap --nodes=1 --ntasks=1 -w "$target_node" /bin/sh -c \
+            'cat >"$1/global_step_$2/data.pt.tmp" && mv "$1/global_step_$2/data.pt.tmp" "$1/global_step_$2/data.pt"' \
+            sh "$target_output" "$iteration"
+    srun --overlap --nodes=1 --ntasks=1 -w "$target_node" /bin/sh -c \
+        'printf "%s" "$2" >"$1/latest_checkpointed_iteration.txt.tmp" && mv "$1/latest_checkpointed_iteration.txt.tmp" "$1/latest_checkpointed_iteration.txt"' \
+        sh "$target_output" "$iteration"
+}
+
+sync_checkpoint_metadata() {
+    local head_output="$RUN_DIR/ray-head/output"
+    local worker_output="$RUN_DIR/ray-worker/output"
+    local head_iteration worker_iteration
+    head_iteration=$(read_checkpoint_iteration "$HEAD_NODE" "$head_output")
+    worker_iteration=$(read_checkpoint_iteration "$WORKER_NODE" "$worker_output")
+    [[ -z "$head_iteration" || "$head_iteration" =~ ^[0-9]+$ ]] || return 2
+    [[ -z "$worker_iteration" || "$worker_iteration" =~ ^[0-9]+$ ]] || return 2
+
+    if [[ -n "$head_iteration" && (${worker_iteration:-0} -lt "$head_iteration") ]]; then
+        copy_checkpoint_metadata \
+            "$HEAD_NODE" "$head_output" "$WORKER_NODE" "$worker_output" "$head_iteration"
+    elif [[ -n "$worker_iteration" && (${head_iteration:-0} -lt "$worker_iteration") ]]; then
+        copy_checkpoint_metadata \
+            "$WORKER_NODE" "$worker_output" "$HEAD_NODE" "$head_output" "$worker_iteration"
+    fi
+}
+
+sync_checkpoint_metadata
+
 start_ray() {
     local node=$1 node_run=$2 train_model=$3
     shift 3
@@ -160,11 +216,27 @@ TRAIN_MODEL="$TRAIN_MODEL_HEAD" ROLLOUT_MODEL="$ROLLOUT_MODEL" DATA="$DATA" \
 RAY_TMPDIR_HOST="$ray_head_run" NETWORK_INTERFACE="$NETWORK_INTERFACE" \
 TRITON_CACHE_DIR_HOST="$TRITON_CACHE_ROOT/$HEAD_NODE" \
 ENABLE_MTP="${ENABLE_MTP:-true}" ENFORCE_EAGER="${ENFORCE_EAGER:-false}" \
-SMOKE_STEPS="${SMOKE_STEPS:-4}" TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-8}" \
-EXPECTED_TRAIN_ROWS="${EXPECTED_TRAIN_ROWS:-32}" \
-EXPECTED_VAL_ROWS="${EXPECTED_VAL_ROWS:-8}" \
+TRAINING_STEPS="${TRAINING_STEPS:-${SMOKE_STEPS:-4}}" \
+TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-8}" \
+EXPECTED_TRAIN_ROWS="${EXPECTED_TRAIN_ROWS:-}" \
+EXPECTED_VAL_ROWS="${EXPECTED_VAL_ROWS:-}" \
 ROLLOUT_TP="${ROLLOUT_TP:-2}" \
 ROLLOUT_GPU_MEMORY_UTILIZATION="${ROLLOUT_GPU_MEMORY_UTILIZATION:-0.5}" \
+ROLLOUT_N="${ROLLOUT_N:-2}" \
+MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-512}" \
+MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-64}" \
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-1024}" \
+MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-1024}" \
+LORA_RANK="${LORA_RANK:-8}" LORA_ALPHA="${LORA_ALPHA:-16}" \
+LEARNING_RATE="${LEARNING_RATE:-1e-5}" \
+PPO_MINI_BATCH_SIZE="${PPO_MINI_BATCH_SIZE:-${TRAIN_BATCH_SIZE:-8}}" \
+USE_KL_LOSS="${USE_KL_LOSS:-true}" \
+KL_LOSS_COEF="${KL_LOSS_COEF:-0.001}" \
+SAVE_FREQ="${SAVE_FREQ:-${TRAINING_STEPS:-${SMOKE_STEPS:-4}}}" \
+TEST_FREQ="${TEST_FREQ:-${TRAINING_STEPS:-${SMOKE_STEPS:-4}}}" \
+REWARD_MODE="${REWARD_MODE:-smoke}" \
+VAL_BEFORE_TRAIN="${VAL_BEFORE_TRAIN:-false}" \
+RESUME_MODE="${RESUME_MODE:-disable}" \
 PROJECT_NAME="${PROJECT_NAME:-qwen38_full_rl_smoke}" \
 EXPERIMENT_NAME="${EXPERIMENT_NAME:-fsdp16_lora_adapter_only_mtp_cudagraph}" \
 DRY_RUN="${DRY_RUN:-0}" \

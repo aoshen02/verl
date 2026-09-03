@@ -92,7 +92,7 @@ def _validate_rollout_model_path(config: RolloutConfig, model_config: HFModelCon
         raise ValueError("rollout.model_path requires adapter-only LoRA (merge=False)")
     if "dummy" in config.load_format:
         raise ValueError("rollout.model_path requires a non-dummy rollout load_format")
-    if config.checkpoint_engine.backend != "naive":
+    if config.checkpoint_engine.backend not in ("naive", None):
         raise ValueError("rollout.model_path requires checkpoint_engine.backend=naive")
 
 
