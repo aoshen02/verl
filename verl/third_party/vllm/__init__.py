@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+import warnings
 from importlib.metadata import PackageNotFoundError, version
 
 from packaging import version as vs
@@ -29,6 +31,11 @@ def get_version(pkg):
 
 package_name = "vllm"
 package_version = get_version(package_name)
+allow_unsupported_version = os.getenv("VERL_ALLOW_UNSUPPORTED_VLLM_VERSION", "0") == "1"
+try:
+    supported_version = package_version is not None and vs.parse(package_version) >= vs.parse("0.18.0")
+except vs.InvalidVersion:
+    supported_version = False
 vllm_version = None
 VLLM_SLEEP_LEVEL = 1
 
@@ -43,7 +50,14 @@ elif is_npu_available:
     VLLM_SLEEP_LEVEL = 1
     from vllm import LLM
     from vllm.distributed import parallel_state
-elif vs.parse(package_version) >= vs.parse("0.18.0"):
+elif supported_version or allow_unsupported_version:
+    if not supported_version:
+        warnings.warn(
+            f"Proceeding with unsupported vllm version {package_version} because "
+            "VERL_ALLOW_UNSUPPORTED_VLLM_VERSION=1.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
     vllm_version = package_version
     VLLM_SLEEP_LEVEL = 2
     from vllm import LLM
@@ -54,7 +68,8 @@ else:
     if not is_sglang_available():
         raise ValueError(
             f"vllm version {package_version} not supported and SGLang also not Found. Currently supported "
-            f"vllm versions are 0.18.0+"
+            "vllm versions are 0.18.0+. For a pinned nightly that exposes the required APIs, explicitly set "
+            "VERL_ALLOW_UNSUPPORTED_VLLM_VERSION=1."
         )
 
 __all__ = ["LLM", "parallel_state"]
