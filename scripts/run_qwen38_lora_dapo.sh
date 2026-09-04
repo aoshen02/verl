@@ -52,9 +52,6 @@ EXPECTED_TRAIN_ROWS=${EXPECTED_TRAIN_ROWS:-17917}
 EXPECTED_VAL_ROWS=${EXPECTED_VAL_ROWS:-30}
 PROJECT_NAME=${PROJECT_NAME:-qwen38_full_dapo_math}
 EXPERIMENT_NAME=${EXPERIMENT_NAME:-fsdp16_lora_r32_mtp_eager_4k}
-EXPECTED_VLLM_VERSION=${EXPECTED_VLLM_VERSION:-0.1.dev20073+g8e685d198}
-EXPECTED_TORCH_VERSION=${EXPECTED_TORCH_VERSION:-2.13.0+cu130}
-EXPECTED_TRANSFORMERS_VERSION=${EXPECTED_TRANSFORMERS_VERSION:-5.16.0}
 
 TOTAL_GPUS=$((NNODES * NGPUS_PER_NODE))
 if ((TOTAL_GPUS <= 0 || TOTAL_GPUS % ROLLOUT_TP != 0)); then
@@ -101,26 +98,7 @@ fi
 
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 export PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
-export VERL_ALLOW_UNSUPPORTED_VLLM_VERSION=1
 UV_PY=(uv run --active --frozen --no-sync python)
-
-runtime_versions=$("${UV_PY[@]}" -c '
-import torch
-import transformers
-import vllm
-print(vllm.__version__)
-print(torch.__version__)
-print(transformers.__version__)
-print(vllm.__file__)
-')
-mapfile -t runtime <<<"$runtime_versions"
-if [[ "${runtime[0]}" != "$EXPECTED_VLLM_VERSION" ||
-      "${runtime[1]}" != "$EXPECTED_TORCH_VERSION" ||
-      "${runtime[2]}" != "$EXPECTED_TRANSFORMERS_VERSION" ||
-      "${runtime[3]}" != /usr/local/lib/python3.12/dist-packages/vllm/* ]]; then
-    printf 'unexpected image runtime:\n%s\n' "$runtime_versions" >&2
-    exit 2
-fi
 
 read_rows() {
     "${UV_PY[@]}" -c \
