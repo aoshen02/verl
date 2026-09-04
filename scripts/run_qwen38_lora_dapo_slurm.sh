@@ -12,6 +12,7 @@ set -euo pipefail
 
 WORKTREE=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 RAY_PORT=${RAY_PORT:-6379}
+RAY_NUM_CPUS=${RAY_NUM_CPUS:-32}
 NETWORK_INTERFACE=${NETWORK_INTERFACE:-ens7}
 LOCAL_STORAGE=${LOCAL_STORAGE:-/mnt/ephemeral/$USER}
 TRITON_CACHE_ROOT=${TRITON_CACHE_ROOT:-$LOCAL_STORAGE/qwen38/cache/triton}
@@ -19,6 +20,11 @@ RAY_MEMORY_USAGE_THRESHOLD=${RAY_MEMORY_USAGE_THRESHOLD:-0.98}
 ROLLOUT_CACHE_HOST=${ROLLOUT_CACHE_HOST:-}
 ROLLOUT_CACHE_READONLY=${ROLLOUT_CACHE_READONLY:-false}
 PYTHON_OVERLAY_HOST=${PYTHON_OVERLAY_HOST:-}
+
+[[ "$RAY_NUM_CPUS" =~ ^[1-9][0-9]*$ ]] || {
+    echo "RAY_NUM_CPUS must be a positive integer" >&2
+    exit 2
+}
 
 allocation_nodes=$(scontrol show job -o "$SLURM_JOB_ID" |
     sed -n 's/.* NodeList=\([^ ]*\).*/\1/p')
@@ -206,7 +212,7 @@ start_ray() {
         -m "$node_run:/tmp:none:bind,rw" \
         -m "$cache:/var/tmp:none:bind,rw" \
         "$IMAGE" /opt/verl-uv-final/bin/ray start "$@" \
-        --temp-dir=/tmp/ray --num-gpus=8 --block &
+        --temp-dir=/tmp/ray --num-cpus="$RAY_NUM_CPUS" --num-gpus=8 --block &
     RAY_PID=$!
 }
 
@@ -278,7 +284,7 @@ worker_pid=$RAY_PID
 wait_for_ray '/16\.0 GPU'
 
 recipe_env=(
-    TRAINING_STEPS TRAIN_BATCH_SIZE PPO_MINI_BATCH_SIZE ROLLOUT_N ROLLOUT_TP
+    FSDP_SIZE TRAINING_STEPS TRAIN_BATCH_SIZE PPO_MINI_BATCH_SIZE ROLLOUT_N ROLLOUT_TP
     MAX_PROMPT_LENGTH MAX_RESPONSE_LENGTH MAX_MODEL_LEN MAX_NUM_BATCHED_TOKENS
     MAX_NUM_SEQS
     LORA_RANK LORA_ALPHA LEARNING_RATE SAVE_FREQ TEST_FREQ RESUME_MODE

@@ -11,6 +11,7 @@ set -euo pipefail
 
 NNODES=${NNODES:-2}
 NGPUS_PER_NODE=${NGPUS_PER_NODE:-8}
+FSDP_SIZE=${FSDP_SIZE:-8}
 TRAINING_STEPS=${TRAINING_STEPS:-100}
 TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-32}
 PPO_MINI_BATCH_SIZE=${PPO_MINI_BATCH_SIZE:-32}
@@ -58,6 +59,11 @@ EXPECTED_TRANSFORMERS_VERSION=${EXPECTED_TRANSFORMERS_VERSION:-5.16.0}
 TOTAL_GPUS=$((NNODES * NGPUS_PER_NODE))
 if ((TOTAL_GPUS <= 0 || TOTAL_GPUS % ROLLOUT_TP != 0)); then
     echo "the positive GPU count must be divisible by rollout TP" >&2
+    exit 2
+fi
+if ((FSDP_SIZE != -1 &&
+      (FSDP_SIZE <= 0 || FSDP_SIZE > TOTAL_GPUS || TOTAL_GPUS % FSDP_SIZE != 0))); then
+    echo "FSDP_SIZE must be -1 or a positive divisor of total GPUs" >&2
     exit 2
 fi
 if ((TRAIN_BATCH_SIZE <= 0 || PPO_MINI_BATCH_SIZE <= 0 ||
@@ -159,6 +165,7 @@ args=(
     actor_rollout_ref.actor.strategy=fsdp2
     +actor_rollout_ref.actor.checkpoint.save_lora_only=True
     actor_rollout_ref.actor.fsdp_config.model_dtype=bf16
+    actor_rollout_ref.actor.fsdp_config.fsdp_size="$FSDP_SIZE"
     actor_rollout_ref.actor.fsdp_config.reshard_after_forward="$RESHARD_AFTER_FORWARD"
     actor_rollout_ref.actor.fsdp_config.use_no_sync_for_gradient_accumulation="$USE_NO_SYNC_FOR_GRADIENT_ACCUMULATION"
     actor_rollout_ref.actor.fsdp_config.pad_to_length="$PAD_TO_LENGTH"
@@ -176,9 +183,6 @@ args=(
     actor_rollout_ref.rollout.tensor_model_parallel_size="$ROLLOUT_TP"
     actor_rollout_ref.rollout.gpu_memory_utilization="$ROLLOUT_GPU_MEMORY_UTILIZATION"
     actor_rollout_ref.rollout.load_format=safetensors
-    actor_rollout_ref.rollout.free_cache_engine=False
-    +actor_rollout_ref.rollout.enable_sleep_mode=False
-    actor_rollout_ref.rollout.layered_summon=True
     actor_rollout_ref.rollout.n="$ROLLOUT_N"
     actor_rollout_ref.rollout.max_model_len="$MAX_MODEL_LEN"
     actor_rollout_ref.rollout.max_num_batched_tokens="$MAX_NUM_BATCHED_TOKENS"
