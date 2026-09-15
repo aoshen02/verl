@@ -19,6 +19,8 @@ import json
 import logging
 import math
 import os
+import socket
+import tempfile
 from abc import ABC
 from collections import OrderedDict
 from contextlib import contextmanager, nullcontext
@@ -92,6 +94,30 @@ def set_no_placement_param_registrations(model: nn.Module, registrations) -> Non
     setattr(model, _NO_PLACEMENT_REGISTRATIONS, tuple(registrations))
 
 
+def _share_no_placement_param(param, directory):
+    """Map one frozen CPU copy per host; each invocation uses a fresh file."""
+    hosts = [None] * dist.get_world_size()
+    dist.all_gather_object(hosts, socket.gethostname())
+    leader = hosts.index(socket.gethostname())
+    path = None
+    if dist.get_rank() == leader:
+        os.makedirs(directory, exist_ok=True)
+        fd, path = tempfile.mkstemp(prefix="verl-frozen-", dir=directory)
+        os.close(fd)
+        mapped = torch.from_file(path, shared=True, size=param.numel(), dtype=param.dtype)
+        mapped.copy_(param.detach().reshape(-1))
+        del mapped
+    paths = [None] * dist.get_world_size()
+    dist.all_gather_object(paths, path)
+    path = paths[leader]
+    mapped = torch.from_file(path, shared=False, size=param.numel(), dtype=param.dtype).view(param.shape)
+    # Unlink only after every local reader has mapped it. The mappings stay alive.
+    dist.barrier()
+    if dist.get_rank() == leader:
+        os.unlink(path)
+    return nn.Parameter(mapped, requires_grad=False)
+
+
 def materialize_no_placement_params(registrations):
     """Broadcast frozen CPU parameters using VERL's CPU/Gloo process group."""
     if not registrations:
@@ -116,6 +142,9 @@ def materialize_no_placement_params(registrations):
             chunk_size = max(1, (256 * 1024**2) // flat.element_size())
             for offset in range(0, flat.numel(), chunk_size):
                 dist.broadcast(flat[offset : offset + chunk_size], src=0)
+            directory = os.getenv("VERL_NO_PLACEMENT_MMAP_DIR")
+            if directory:
+                param = _share_no_placement_param(param, directory)
 
         for module, local_name, _, full_name in grouped_registrations:
             module._parameters[local_name] = param

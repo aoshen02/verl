@@ -19,6 +19,9 @@ Launch:
         tests/special_distributed/test_fsdp2_full_state_load.py
 """
 
+import os
+import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 
 import torch
@@ -93,7 +96,25 @@ def main() -> None:
         raise RuntimeError(f"expected two ranks, got {world_size}")
     torch.cuda.set_device(rank)
     mesh = init_device_mesh("cuda", (world_size,), mesh_dim_names=("fsdp",))
-    model, full_state = _build_model(rank)
+    with tempfile.TemporaryDirectory() as directory:
+        directories = [directory]
+        dist.broadcast_object_list(directories, src=0)
+        os.environ["VERL_NO_PLACEMENT_MMAP_DIR"] = directories[0]
+        model, full_state = _build_model(rank)
+        ptr = model.large.weight.data_ptr()
+        mapping = next(
+            line.split()
+            for line in Path("/proc/self/maps").read_text().splitlines()
+            if int(line.split()[0].split("-")[0], 16) <= ptr < int(line.split()[0].split("-")[1], 16)
+        )
+        backing_files = [None] * world_size
+        dist.all_gather_object(backing_files, mapping[3:5])  # device and inode, not virtual address
+        assert backing_files[0] == backing_files[1]
+        assert mapping[4] != "0"
+        dist.barrier()
+        assert not list(Path(directories[0]).iterdir())
+        dist.barrier()
+        del os.environ["VERL_NO_PLACEMENT_MMAP_DIR"]
     expected = (
         full_state["block.linear.weight"].detach().clone().to("cuda")
         if rank == 0
