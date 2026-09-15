@@ -650,7 +650,7 @@ def fsdp2_load_full_state_dict(
 
     if buffers is None:
         buffers = {name: buffer.detach().cpu() for name, buffer in model.named_buffers() if not buffer.is_meta}
-    to_empty_preserving_shared_params(model, get_device_id())
+    model.to_empty(device=get_device_id())
     for name, buffer in model.named_buffers():
         if name in buffers:
             buffer.copy_(buffers[name].to(buffer.device))
