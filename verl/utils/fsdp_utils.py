@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import functools
-import inspect
 import itertools
 import json
 import logging
@@ -63,31 +62,23 @@ _NO_PLACEMENT_REGISTRATIONS = "_verl_no_placement_param_registrations"
 def get_no_placement_param_registrations(model: nn.Module):
     """Resolve Transformers parameters that must stay on their current device."""
     patterns = getattr(model, "_no_placement_params", None) or ()
-    if not patterns:
-        return ()
-
-    named_params = list(model.named_parameters(remove_duplicate=False))
+    named_params = dict(model.named_parameters(remove_duplicate=False)) if patterns else {}
     matched_params = set()
-    missing_patterns = []
     for pattern in patterns:
-        matches = [param for name, param in named_params if name == pattern or name.endswith(f".{pattern}")]
+        matches = {param for name, param in named_params.items() if name == pattern or name.endswith(f".{pattern}")}
         if not matches:
-            missing_patterns.append(pattern)
+            raise ValueError(f"Could not resolve _no_placement_params entry: {pattern}")
         matched_params.update(matches)
-
-    if missing_patterns:
-        raise ValueError(f"Could not resolve _no_placement_params entries: {missing_patterns}")
-    trainable = [name for name, param in named_params if param in matched_params and param.requires_grad]
+    trainable = [name for name, param in named_params.items() if param in matched_params and param.requires_grad]
     if trainable:
         raise ValueError(f"FSDP2 cannot train CPU-resident _no_placement_params: {trainable}")
 
-    registrations = []
-    for module_name, module in model.named_modules():
-        for local_name, param in module._parameters.items():
-            if param in matched_params:
-                full_name = f"{module_name}.{local_name}" if module_name else local_name
-                registrations.append((module, local_name, param, full_name))
-    return tuple(registrations)
+    return tuple(
+        (module, name, param, f"{prefix}.{name}" if prefix else name)
+        for prefix, module in model.named_modules()
+        for name, param in module._parameters.items()
+        if param in matched_params
+    )
 
 
 def set_no_placement_param_registrations(model: nn.Module, registrations) -> None:
@@ -120,9 +111,6 @@ def _share_no_placement_param(param, directory):
 
 def materialize_no_placement_params(registrations):
     """Broadcast frozen CPU parameters using VERL's CPU/Gloo process group."""
-    if not registrations:
-        return ()
-
     by_param = {}
     for registration in registrations:
         by_param.setdefault(id(registration[2]), []).append(registration)
@@ -157,10 +145,6 @@ def temporarily_detach_no_placement_params(model: nn.Module, registrations=None)
     """Keep CPU-resident parameters out of recursive ``Module.to`` calls."""
     if registrations is None:
         registrations = vars(model).get(_NO_PLACEMENT_REGISTRATIONS, ())
-    if not registrations:
-        yield
-        return
-
     for module, name, param, full_name in registrations:
         if module._parameters.get(name) is not param:
             raise RuntimeError(f"Unexpected parameter registration for {full_name}")
@@ -739,8 +723,6 @@ def apply_fsdp2(model, fsdp_kwargs, config):
     modules = _select_fsdp2_wrap_targets(model, fsdp_transformer_layer_cls_to_wrap)
     ignored_params = fsdp_kwargs.get("ignored_params") or set()
     if ignored_params:
-        if "ignored_params" not in inspect.signature(fully_shard).parameters:
-            raise RuntimeError("This PyTorch fully_shard API does not support ignored_params")
         modules = [module for module in modules if any(param not in ignored_params for param in module.parameters())]
 
     for idx, module in enumerate(modules):
