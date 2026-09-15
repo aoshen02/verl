@@ -63,6 +63,7 @@ from verl.utils.fsdp_utils import (
     replace_lora_wrapper,
     set_no_placement_param_registrations,
     temporarily_detach_no_placement_params,
+    to_empty_preserving_shared_params,
 )
 from verl.utils.model import convert_weight_keys, extract_multi_modal_inputs
 from verl.utils.py_functional import convert_to_regular_types
@@ -473,7 +474,7 @@ class FSDPEngine(BaseEngine):
             with temporarily_detach_no_placement_params(module, no_placement):
                 full_state = module.state_dict()
                 buffers = {name: buffer.detach().cpu() for name, buffer in module.named_buffers() if not buffer.is_meta}
-                module.to_empty(device="meta")
+                to_empty_preserving_shared_params(module, "meta")
             if no_placement:
                 fsdp_kwargs["ignored_params"] = {param for _, _, param, _ in no_placement}
             apply_fsdp2(module, fsdp_kwargs, self.engine_config)

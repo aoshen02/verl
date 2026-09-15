@@ -27,7 +27,9 @@ from types import SimpleNamespace
 import torch
 import torch.distributed as dist
 from torch import nn
+from torch.distributed.checkpoint.state_dict import StateDictOptions, get_model_state_dict
 from torch.distributed.device_mesh import init_device_mesh
+from transformers import Qwen2Config, Qwen2ForCausalLM
 
 from verl.utils.distributed import initialize_global_process_group
 from verl.utils.fsdp_utils import (
@@ -38,6 +40,7 @@ from verl.utils.fsdp_utils import (
     materialize_no_placement_params,
     set_no_placement_param_registrations,
     temporarily_detach_no_placement_params,
+    to_empty_preserving_shared_params,
 )
 
 
@@ -87,6 +90,43 @@ def _forbid_full_model_to(*args, **kwargs) -> None:
     raise AssertionError("full model must not be materialized with Module.to")
 
 
+def _check_tied_checkpoint_roundtrip(rank, mesh):
+    config = Qwen2Config(
+        vocab_size=32,
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=2,
+        tie_word_embeddings=True,
+    )
+    model = Qwen2ForCausalLM(config).to(dtype=torch.bfloat16)
+    state = model.state_dict() if rank == 0 else {}
+    buffers = {name: buffer.detach().cpu() for name, buffer in model.named_buffers()}
+    to_empty_preserving_shared_params(model, "meta")
+    assert model.model.embed_tokens.weight is model.lm_head.weight
+    apply_fsdp2(
+        model,
+        {"mesh": mesh, "mp_policy": MixedPrecisionPolicy(param_dtype=torch.bfloat16), "reshard_after_forward": True},
+        {"wrap_policy": {"transformer_layer_cls_to_wrap": ["Qwen2DecoderLayer"]}},
+    )
+    fsdp2_load_full_state_dict(model, state, mesh, buffers=buffers)
+    assert model.model.embed_tokens.weight is model.lm_head.weight
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    tokens = torch.tensor([[1, 2, 3, 4]], device="cuda")
+    model(input_ids=tokens, labels=tokens).loss.backward()
+    optimizer.step()
+    merged = get_model_state_dict(model, options=StateDictOptions(full_state_dict=True, cpu_offload=True))
+    if rank == 0:
+        torch.testing.assert_close(merged["model.embed_tokens.weight"], merged["lm_head.weight"], atol=0, rtol=0)
+        with tempfile.TemporaryDirectory() as directory:
+            Qwen2ForCausalLM(config).to(dtype=torch.bfloat16).save_pretrained(directory, state_dict=merged)
+            restored = Qwen2ForCausalLM.from_pretrained(directory, dtype=torch.bfloat16).state_dict()
+            for name in merged:
+                torch.testing.assert_close(merged[name], restored[name], atol=0, rtol=0)
+    dist.barrier()
+
+
 def main() -> None:
     if not torch.cuda.is_available() or torch.cuda.device_count() < 2:
         print("test_fsdp2_full_state_load skipped: requires two CUDA devices")
@@ -124,7 +164,7 @@ def main() -> None:
     buffers = {name: buffer.detach().cpu() for name, buffer in model.named_buffers()}
     registrations = vars(model)["_verl_no_placement_param_registrations"]
     with temporarily_detach_no_placement_params(model):
-        model.to_empty(device="meta")
+        to_empty_preserving_shared_params(model, "meta")
     apply_fsdp2(
         model,
         {
@@ -154,6 +194,7 @@ def main() -> None:
     output.sum().backward()
     assert torch.isfinite(output).all()
     assert model.block.linear.weight.grad is not None
+    _check_tied_checkpoint_roundtrip(rank, mesh)
     dist.barrier()
     dist.destroy_process_group()
     if rank == 0:

@@ -605,6 +605,20 @@ def get_fsdp_full_state_dict(model: torch.nn.Module, offload_to_cpu: bool = True
         raise NotImplementedError(f"Unknown FSDP version {fsdp_version}")
 
 
+def to_empty_preserving_shared_params(model: nn.Module, device):
+    """Keep parameter aliases when materializing or discarding storage."""
+    aliases = {}
+    for module in model.modules():
+        for name, param in module._parameters.items():
+            if param is not None:
+                aliases.setdefault(id(param), []).append((module, name))
+    model.to_empty(device=device)
+    for registrations in aliases.values():
+        owner, name = registrations[0]
+        for module, alias in registrations[1:]:
+            module._parameters[alias] = owner._parameters[name]
+
+
 def fsdp2_load_full_state_dict(
     model: torch.nn.Module,
     full_state: dict,
@@ -636,7 +650,7 @@ def fsdp2_load_full_state_dict(
 
     if buffers is None:
         buffers = {name: buffer.detach().cpu() for name, buffer in model.named_buffers() if not buffer.is_meta}
-    model = model.to_empty(device=get_device_id())
+    to_empty_preserving_shared_params(model, get_device_id())
     for name, buffer in model.named_buffers():
         if name in buffers:
             buffer.copy_(buffers[name].to(buffer.device))
