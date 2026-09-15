@@ -469,7 +469,6 @@ class FSDPEngine(BaseEngine):
             }
             no_placement = materialize_no_placement_params(
                 get_no_placement_param_registrations(module),
-                cache_scope=self.model_config.local_path,
             )
             with temporarily_detach_no_placement_params(module, no_placement):
                 full_state = module.state_dict()

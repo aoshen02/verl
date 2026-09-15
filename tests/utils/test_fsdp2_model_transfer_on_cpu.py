@@ -85,18 +85,16 @@ def test_no_placement_param_must_be_frozen():
         raise AssertionError("expected trainable no-placement parameter to fail")
 
 
-def test_no_placement_param_is_reused_from_process_cache(monkeypatch):
+def test_no_placement_params_do_not_reuse_another_models_weights(monkeypatch):
     first = _NoPlacementModel()
     second = _NoPlacementModel()
     first_registrations = fsdp_utils.get_no_placement_param_registrations(first)
     second_registrations = fsdp_utils.get_no_placement_param_registrations(second)
-    monkeypatch.setattr(fsdp_utils, "_NO_PLACEMENT_CACHE", {})
     monkeypatch.setattr(fsdp_utils.dist, "is_initialized", lambda: False)
 
-    first_registrations = fsdp_utils.materialize_no_placement_params(first_registrations, cache_scope="same-checkpoint")
-    second_registrations = fsdp_utils.materialize_no_placement_params(
-        second_registrations, cache_scope="same-checkpoint"
-    )
+    fsdp_utils.materialize_no_placement_params(first_registrations)
+    fsdp_utils.materialize_no_placement_params(second_registrations)
 
-    assert first_registrations[0][2] is second_registrations[0][2]
-    assert first.large.weight is second.large.weight
+    assert first.large.weight is first_registrations[0][2]
+    assert second.large.weight is second_registrations[0][2]
+    assert first.large.weight is not second.large.weight

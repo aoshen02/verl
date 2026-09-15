@@ -56,9 +56,6 @@ else:
 
 
 _NO_PLACEMENT_REGISTRATIONS = "_verl_no_placement_param_registrations"
-# Entries intentionally live for the process lifetime and are shared by actor/ref.
-_NO_PLACEMENT_CACHE = {}
-_NO_PLACEMENT_GLOO_GROUP = None
 
 
 def get_no_placement_param_registrations(model: nn.Module):
@@ -95,59 +92,34 @@ def set_no_placement_param_registrations(model: nn.Module, registrations) -> Non
     setattr(model, _NO_PLACEMENT_REGISTRATIONS, tuple(registrations))
 
 
-def materialize_no_placement_params(registrations, cache_scope):
-    """Materialize and share immutable CPU parameters on every rank."""
+def materialize_no_placement_params(registrations):
+    """Broadcast frozen CPU parameters using VERL's CPU/Gloo process group."""
     if not registrations:
         return ()
-
-    global _NO_PLACEMENT_GLOO_GROUP
-    if dist.is_initialized() and dist.get_world_size() > 1 and _NO_PLACEMENT_GLOO_GROUP is None:
-        _NO_PLACEMENT_GLOO_GROUP = dist.new_group(backend="gloo")
 
     by_param = {}
     for registration in registrations:
         by_param.setdefault(id(registration[2]), []).append(registration)
 
     result = []
+    distributed = dist.is_initialized() and dist.get_world_size() > 1
     for grouped_registrations in by_param.values():
-        source_param = grouped_registrations[0][2]
-        names = tuple(sorted(registration[3] for registration in grouped_registrations))
-        cache_key = (cache_scope, names, tuple(source_param.shape), source_param.dtype)
-        param = _NO_PLACEMENT_CACHE.get(cache_key)
-        if param is None:
-            if not dist.is_initialized() or dist.get_world_size() == 1:
-                if source_param.is_meta:
-                    raise RuntimeError(f"Cannot materialize _no_placement_params {names} from meta")
-                param = source_param
-            else:
-                if dist.get_rank() == 0:
-                    if source_param.is_meta or source_param.device.type != "cpu":
-                        raise RuntimeError(f"Rank 0 must own CPU data for _no_placement_params {names}")
-                    param = source_param
-                else:
-                    param = nn.Parameter(
-                        torch.empty(
-                            source_param.shape,
-                            dtype=source_param.dtype,
-                            device="cpu",
-                        ),
-                        requires_grad=False,
-                    )
-                if not param.is_contiguous():
-                    raise RuntimeError(f"_no_placement_params must be contiguous: {names}")
-                flat = param.detach().view(-1)
-                chunk_size = max(1, (256 * 1024**2) // flat.element_size())
-                for offset in range(0, flat.numel(), chunk_size):
-                    dist.broadcast(
-                        flat[offset : offset + chunk_size],
-                        src=0,
-                        group=_NO_PLACEMENT_GLOO_GROUP,
-                    )
-            _NO_PLACEMENT_CACHE[cache_key] = param
+        param = grouped_registrations[0][2]
+        name = grouped_registrations[0][3]
+        if distributed and dist.get_rank() != 0:
+            param = nn.Parameter(torch.empty_like(param, device="cpu"), requires_grad=False)
+        elif param.is_meta or param.device.type != "cpu":
+            raise RuntimeError(f"Expected CPU data for _no_placement_params: {name}")
 
-        for module, name, _, full_name in grouped_registrations:
-            module._parameters[name] = param
-            result.append((module, name, param, full_name))
+        if distributed:
+            flat = param.detach().view(-1)
+            chunk_size = max(1, (256 * 1024**2) // flat.element_size())
+            for offset in range(0, flat.numel(), chunk_size):
+                dist.broadcast(flat[offset : offset + chunk_size], src=0)
+
+        for module, local_name, _, full_name in grouped_registrations:
+            module._parameters[local_name] = param
+            result.append((module, local_name, param, full_name))
     return tuple(result)
 
 

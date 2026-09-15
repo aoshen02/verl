@@ -89,9 +89,7 @@ def sort_placement_group_by_node_ip(pgs: list[PlacementGroup]) -> list[Placement
 
 @ray.remote
 def get_master_addr_port(master_port_range: Optional[list[int]] = None) -> tuple[str, str]:
-    node_id = ray.get_runtime_context().get_node_id()
-    node_ips = {node["NodeID"]: node["NodeManagerAddress"] for node in ray.nodes()}
-    addr = node_ips[node_id].strip("[]")
+    addr = ray.util.get_node_ip_address().strip("[]")
 
     if master_port_range is None:
         with socket.socket() as s:

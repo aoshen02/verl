@@ -41,7 +41,11 @@ from verl.utils.fsdp_utils import (
 class ToyBlock(nn.Module):
     def __init__(self) -> None:
         super().__init__()
+        self.embedding = nn.Embedding(8, 4)
         self.linear = nn.Linear(4, 4, bias=False)
+
+    def forward(self, tokens):
+        return self.linear(self.embedding(tokens))
 
 
 class BufferedModel(nn.Module):
@@ -56,6 +60,9 @@ class BufferedModel(nn.Module):
         self.large.weight.requires_grad_(False)
         self.register_buffer("marker", torch.arange(4, dtype=torch.bfloat16), persistent=False)
 
+    def forward(self, tokens):
+        return self.block(tokens)
+
 
 def _build_model(rank: int) -> tuple[BufferedModel, dict[str, torch.Tensor]]:
     model = BufferedModel()
@@ -66,9 +73,7 @@ def _build_model(rank: int) -> tuple[BufferedModel, dict[str, torch.Tensor]]:
             torch.empty(model.large.weight.shape, device="meta"),
             requires_grad=False,
         )
-    registrations = materialize_no_placement_params(
-        get_no_placement_param_registrations(model), cache_scope="distributed-test"
-    )
+    registrations = materialize_no_placement_params(get_no_placement_param_registrations(model))
     set_no_placement_param_registrations(model, registrations)
     with temporarily_detach_no_placement_params(model):
         state = model.state_dict() if rank == 0 else {}
@@ -123,6 +128,11 @@ def main() -> None:
     assert model.large.weight.device.type == "cpu"
     expected_large = torch.arange(32, dtype=torch.float32).view(8, 4)
     torch.testing.assert_close(model.large.weight, expected_large)
+    # A nested embedding must not create an overlapping FSDP unit inside ToyBlock.
+    output = model(torch.tensor([1, 2], device="cuda"))
+    output.sum().backward()
+    assert torch.isfinite(output).all()
+    assert model.block.linear.weight.grad is not None
     dist.barrier()
     dist.destroy_process_group()
     if rank == 0:
