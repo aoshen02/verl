@@ -62,7 +62,8 @@ def _load_vllm_rollout_utils():
     fake_vllm_utils = types.ModuleType("verl.utils.vllm")
 
     class _FakeTensorLoRARequest:
-        pass
+        def __init__(self, **kwargs):
+            self.lora_tensors = kwargs["lora_tensors"]
 
     class _FakeVLLMHijack:
         @staticmethod
@@ -215,6 +216,18 @@ def test_vllm_update_weights_loads_params_and_buffers():
     torch.testing.assert_close(
         model.model.layers[0].e_score_correction_bias, torch.tensor([5, 6, 7, 8], dtype=torch.float32)
     )
+
+
+def test_vllm_lora_update_reuses_callback_owned_tensors():
+    worker = object.__new__(vLLMColocateWorkerExtension)
+    requests = []
+    worker.add_lora = requests.append
+    tensor = torch.ones(4)
+
+    worker._update_weights([("lora_A", tensor)], peft_config={"r": 1}, base_sync_done=True)
+
+    assert len(requests) == 1
+    assert requests[0].lora_tensors["lora_A"] is tensor
 
 
 def test_vllm_update_weights_syncs_buffers_to_mtp_drafter():
