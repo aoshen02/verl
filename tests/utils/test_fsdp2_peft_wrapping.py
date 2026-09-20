@@ -20,11 +20,13 @@ works for: (1) vanilla models, (2) peft-wrapped models, (3) tied embeddings.
 """
 
 import unittest
+from abc import ABC
 from types import SimpleNamespace
 
 import torch.nn as nn
 
-from verl.utils.fsdp_utils import _select_fsdp2_wrap_targets
+from verl.utils import fsdp_utils
+from verl.utils.fsdp_utils import _select_fsdp2_wrap_targets, maybe_patch_fsdp_module
 
 
 class MockDecoderLayer(nn.Module):
@@ -68,6 +70,23 @@ class MockCausalLM(nn.Module):
 
 class TestFSDP2PeftWrapping(unittest.TestCase):
     """Test module selection in apply_fsdp2 for vanilla and peft-wrapped models."""
+
+    def test_abc_patch_preserves_module_layout_for_both_base_orders(self):
+        """HF ABC-first classes need the patch; PEFT Module-first classes do not."""
+        class ABCFirst(ABC, nn.Module):
+            pass
+
+        class ModuleFirst(nn.Module, ABC):
+            pass
+
+        original = fsdp_utils.fully_shard_module.FSDPModule
+        for cls in (ABCFirst, ModuleFirst, nn.Linear):
+            with self.subTest(cls=cls):
+                module = cls(2, 2) if cls is nn.Linear else cls()
+                with maybe_patch_fsdp_module(module):
+                    wrapper = fsdp_utils.fully_shard_module.FSDPModule
+                    module.__class__ = type("Wrapped", (wrapper, cls), {})
+                self.assertIs(fsdp_utils.fully_shard_module.FSDPModule, original)
 
     def _get_wrapped_names(self, model, cls_names):
         """Return names of modules selected for wrapping."""
