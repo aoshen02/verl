@@ -126,6 +126,17 @@ class FSDPEngine(BaseEngine):
         self.engine_config = engine_config
         self.optimizer_config = optimizer_config
         self.checkpoint_config = checkpoint_config
+        mixed_precision = engine_config.mixed_precision
+        self._preserve_load_dtypes = mixed_precision is not None and mixed_precision.get("param_dtype", "bf16") is None
+        if self._preserve_load_dtypes:
+            if engine_config.strategy != "fsdp2" or engine_config.model_dtype is None:
+                raise ValueError("param_dtype=null requires fsdp2 and an explicit model_dtype")
+            if getattr(getattr(engine_config, "qat", None), "enable", False):
+                raise ValueError("param_dtype=null does not support QAT weight export")
+            logger.warning(
+                "Preserving loader dtypes with model_dtype=%s; no autocast or adapter downcast. "
+                "An fp32-loaded model remains fp32 during training.", engine_config.model_dtype,
+            )
 
         self.mode = None
 
@@ -324,8 +335,8 @@ class FSDPEngine(BaseEngine):
                 fused_kernels_backend=fused_kernels_backend,
             )
 
-            # some parameters may not in torch_dtype
-            module.to(torch_dtype)
+            if not self._preserve_load_dtypes:
+                module.to(torch_dtype)
 
             if self.model_config.enable_gradient_checkpointing:
                 module.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
@@ -365,7 +376,7 @@ class FSDPEngine(BaseEngine):
             # FSDP requires all params in a flat group to share dtype: cast a
             # fp32 adapter to the bf16 base dtype only when they actually differ.
             base_dtype = next((p.dtype for p in module.parameters() if not p.requires_grad), None)
-            if base_dtype is not None:
+            if base_dtype is not None and not self._preserve_load_dtypes:
                 mismatched = [p for p in module.parameters() if p.requires_grad and p.dtype != base_dtype]
                 if mismatched:
                     logger.info(
@@ -385,7 +396,8 @@ class FSDPEngine(BaseEngine):
 
         mixed_precision_config = self.engine_config.mixed_precision
         if mixed_precision_config is not None:
-            param_dtype = PrecisionType.to_dtype(mixed_precision_config.get("param_dtype", "bf16"))
+            configured_dtype = mixed_precision_config.get("param_dtype", "bf16")
+            param_dtype = None if configured_dtype is None else PrecisionType.to_dtype(configured_dtype)
             reduce_dtype = PrecisionType.to_dtype(mixed_precision_config.get("reduce_dtype", "fp32"))
             buffer_dtype = PrecisionType.to_dtype(mixed_precision_config.get("buffer_dtype", "fp32"))
         else:
@@ -395,7 +407,8 @@ class FSDPEngine(BaseEngine):
 
         mixed_precision = MixedPrecision(param_dtype=param_dtype, reduce_dtype=reduce_dtype, buffer_dtype=buffer_dtype)
 
-        self._autocast_dtype = param_dtype
+        # A null FSDP2 policy preserves the dtypes chosen by the model loader.
+        self._autocast_dtype = torch.float32 if param_dtype is None else param_dtype
         # fp16 training requires loss scaling to avoid gradient underflow. Mirror the pattern
         # landed in #4036 for the legacy dp_actor path. bf16 / fp32 do not need a scaler.
         if param_dtype == torch.float16:
