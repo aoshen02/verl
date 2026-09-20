@@ -63,6 +63,24 @@ class VLLMHijack:
                 if isinstance(lora_request, TensorLoRARequest):
                     peft_config = lora_request.peft_config
                     lora_tensors = lora_request.lora_tensors
+                    model_config = getattr(self._adapter_manager.model, "config", None)
+                    text_config = (
+                        model_config.get_text_config()
+                        if hasattr(model_config, "get_text_config")
+                        else model_config
+                    )
+                    if getattr(text_config, "model_type", None) in (
+                        "inkling_model",
+                        "inkling_text",
+                    ):
+                        from verl.utils.inkling_lora import convert_inkling_lora
+
+                        lora_tensors, peft_config = convert_inkling_lora(
+                            lora_tensors,
+                            peft_config,
+                            num_experts=text_config.n_routed_experts,
+                            num_shared_experts=text_config.n_shared_experts,
+                        )
                     peft_helper = PEFTHelper.from_dict(peft_config)
                 else:
                     lora_path = get_adapter_absolute_path(lora_request.lora_path)
@@ -79,7 +97,9 @@ class VLLMHijack:
                 hf_to_vllm_mapper = None
                 if hasattr(model, "hf_to_vllm_mapper") and model.hf_to_vllm_mapper is not None:
                     hf_to_vllm_mapper = model.hf_to_vllm_mapper
-                    if is_version_ge(minver="0.25.0"):
+                    if hasattr(hf_to_vllm_mapper, "get_rename_mapper"):
+                        hf_to_vllm_mapper = hf_to_vllm_mapper.get_rename_mapper()
+                    elif hasattr(hf_to_vllm_mapper, "get_unstacked_mapper"):
                         hf_to_vllm_mapper = hf_to_vllm_mapper.get_unstacked_mapper()
 
                 lora_request_kwargs = {

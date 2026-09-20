@@ -408,6 +408,17 @@ class vLLMHttpServer:
                 "max_loras": 1,
                 "max_lora_rank": get_vllm_max_lora_rank(lora_rank),
             }
+            text_config = self.model_config.hf_config.get_text_config()
+            if text_config.model_type in ("inkling_model", "inkling_text"):
+                if engine_kwargs.get("enable_moe_shared_loras"):
+                    raise ValueError(
+                        "VERL's Inkling adapter export has independent routed-expert "
+                        "factors and is incompatible with enable_moe_shared_loras."
+                    )
+                # Independent dense/shared factors require a larger serving rank.
+                lora_args["max_lora_rank"] = get_vllm_max_lora_rank(
+                    lora_rank * max(2, text_config.n_shared_experts)
+                )
             if self.model_config.lora.get("fully_sharded_loras", False):
                 lora_args["fully_sharded_loras"] = True
             args.update(lora_args)
