@@ -260,24 +260,12 @@ if [[ "${MODE}" == baseline-r3 ]]; then
   [[ "${ACTOR_OPTIMIZER}" == dist_opt ]] || die "Megatron baseline requires dist_opt"
   ENGINE_ARGS=(model_engine=megatron)
   ACTOR_ARGS=(
-    actor_rollout_ref.actor.megatron.tensor_model_parallel_size=1
     actor_rollout_ref.actor.megatron.pipeline_model_parallel_size="${ACTOR_PP}"
     actor_rollout_ref.actor.megatron.context_parallel_size="${ACTOR_CP}"
     actor_rollout_ref.actor.megatron.expert_model_parallel_size="${ACTOR_EP}"
-    actor_rollout_ref.actor.megatron.expert_tensor_parallel_size=1
     ++actor_rollout_ref.actor.megatron.override_transformer_config.fp8=e4m3
     ++actor_rollout_ref.actor.megatron.override_transformer_config.fp8_recipe=mxfp8
-    ++actor_rollout_ref.actor.megatron.override_transformer_config.fp8_param=False
-    ++actor_rollout_ref.actor.megatron.override_transformer_config.disable_parameter_transpose_cache=True
-    ++actor_rollout_ref.actor.megatron.override_transformer_config.apply_dsa_kernel_fusion=True
-    ++actor_rollout_ref.actor.megatron.override_transformer_config.dsa_indexer_use_sparse_loss=True
     ++actor_rollout_ref.actor.megatron.override_transformer_config.dsa_indexer_loss_coeff=0.0
-    ++actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method=uniform
-    ++actor_rollout_ref.actor.megatron.override_transformer_config.recompute_granularity=full
-    ++actor_rollout_ref.actor.megatron.override_transformer_config.recompute_num_layers=1
-    ++actor_rollout_ref.actor.megatron.override_transformer_config.use_fused_mhc=False
-    ++actor_rollout_ref.actor.megatron.override_ddp_config.fp8_param_gather=False
-    ++actor_rollout_ref.actor.megatron.override_ddp_config.reuse_grad_buf_for_mxfp8_param_ag=False
   )
   if (( ACTOR_CP > 1 )); then
     ACTOR_ARGS+=(
@@ -286,14 +274,7 @@ if [[ "${MODE}" == baseline-r3 ]]; then
       ++actor_rollout_ref.actor.megatron.override_transformer_config.max_seqlen_per_dp_cp_rank="$((MAX_MODEL_LEN / ACTOR_CP))"
     )
   fi
-  OPTIMIZER_ARGS=(
-    actor_rollout_ref.actor.megatron.param_offload=False
-    actor_rollout_ref.actor.megatron.optimizer_offload=True
-    +actor_rollout_ref.actor.optim.override_optimizer_config.optimizer_offload_fraction=0.75
-    +actor_rollout_ref.actor.optim.override_optimizer_config.optimizer_cpu_offload=True
-    +actor_rollout_ref.actor.optim.override_optimizer_config.overlap_cpu_optimizer_d2h_h2d=False
-    +actor_rollout_ref.actor.optim.override_optimizer_config.reuse_grad_buf_for_mxfp8_param_ag=False
-  )
+  OPTIMIZER_ARGS=()
 fi
 OUTPUT_ROOT="${OUTPUT_ROOT:-/workspace/outputs/ds4_true_on_policy_preview/${HARDWARE}/${MODE}}"
 RUN_NAME="${RUN_NAME:-ds4_v4_${HARDWARE}_${MODE//-/_}}"
