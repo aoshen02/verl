@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # DeepSeek-V4 true-on-policy preview for VERL.
 # aligned/quick_alignment_test use batch-invariant vLLM for exact probabilities;
-# baseline-r3 keeps the ordinary mLite actor and routing replay for comparison.
+# baseline-r3 uses Megatron dev with MXFP8 training and routing replay.
 # Modes: quick_alignment_test (1x4, four layers, two steps), aligned,
 #        baseline-r3.
 # Hardware: h100 (8x8, PP4/CP2/EP16, rollout EP16);
@@ -11,7 +11,9 @@
 #   docker://iseekyan/verl:ds4_vllm_align.preview-amd64
 # Sources:
 #   VERL_ROOT: verl-project/verl main checkout
-#   MEGATRON_ROOT: Megatron preview branch checkout created with:
+#   MEGATRON_ROOT: preview branch for aligned/quick_alignment_test;
+#     ISEEKYAN/Megatron-LM dev for baseline-r3 (requires Megatron-Bridge).
+#     Preview checkout:
 #     git clone --branch ds4_vllm_align_preview \
 #       https://github.com/ISEEKYAN/Megatron-LM.git "${MEGATRON_ROOT}"
 set -euo pipefail
@@ -20,14 +22,13 @@ set -euo pipefail
 # Optional env: training steps, batch size, lengths, output paths, WANDB_API_KEY,
 # WANDB_ENTITY, WANDB_MODE, WANDB_BASE_URL, and Hydra overrides.
 SEED="${SEED:-42}"
+export VERL_ROLLOUT_DISABLE_DEBUG_FILL="${VERL_ROLLOUT_DISABLE_DEBUG_FILL:-1}"
 ACTOR_LR="${ACTOR_LR:-1e-6}"
 MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-2048}"
 PROJECT_NAME="${PROJECT_NAME:-verl-ds4-v4-preview}"
 ACTOR_OPTIMIZER="${ACTOR_OPTIMIZER:-dist_opt}"
 
 VLLM_BATCH_INVARIANT_KERNEL_LIB="${VLLM_BATCH_INVARIANT_KERNEL_LIB:-/opt/ds4/kernels/_vllm_batch_invariant_C.so}"
-DS4_BI_TOPK_LIB="${DS4_BI_TOPK_LIB:-/opt/ds4/kernels/ds4_bi_topk.so}"
-export VLLM_BATCH_INVARIANT_KERNEL_LIB DS4_BI_TOPK_LIB
 
 usage() {
   echo "usage: $0 --hardware {h100|gb200} --mode {quick_alignment_test|aligned|baseline-r3} [Hydra overrides...]"
@@ -76,7 +77,7 @@ done
 
 # --- Required repositories and inputs ---
 : "${VERL_ROOT:?mount VERL and set VERL_ROOT}"
-: "${MEGATRON_ROOT:?mount ISEEKYAN/Megatron-LM ds4_vllm_align_preview and set MEGATRON_ROOT}"
+: "${MEGATRON_ROOT:?set MEGATRON_ROOT to the mode-specific Megatron checkout}"
 : "${MODEL_PATH:?set MODEL_PATH to a DS4 config/tokenizer directory or checkpoint}"
 : "${TRAIN_FILES:?set TRAIN_FILES to DAPO-format training parquet}"
 : "${VAL_FILES:?set VAL_FILES to DAPO-format validation parquet}"
@@ -99,12 +100,12 @@ case "${MODE}" in
   aligned|baseline-r3)
     [[ "${MODE}" == aligned ]] && EXACT_ALIGNMENT=1 || EXACT_ALIGNMENT=0
     : "${TOTAL_TRAINING_STEPS:=20}"
-    : "${TRAIN_BATCH_SIZE:=32}"
+    : "${TRAIN_BATCH_SIZE:=128}"
     : "${PPO_MINI_BATCH_SIZE:=32}"
     : "${OVERLONG_BUFFER_LEN:=4096}"
     : "${ROLLOUT_N:=8}"
     : "${MAX_RESPONSE_LENGTH:=8192}"
-    : "${ROLLOUT_MAX_NUM_SEQS:=32}"
+    : "${ROLLOUT_MAX_NUM_SEQS:=64}"
     : "${ROLLOUT_GPU_MEMORY_UTILIZATION:=0.65}"
     ;;
   *)
@@ -128,11 +129,14 @@ else
 fi
 
 # Alignment behavior belongs to the mode, not to the hardware profile.
+: "${ROLLOUT_MAX_NUM_BATCHED_TOKENS:=8192}"
 MODE_ARGS=()
 if [[ "${EXACT_ALIGNMENT}" == 1 ]]; then
+  : "${ROLLOUT_MOE_BACKEND:=deep_gemm}"
   export VLLM_BATCH_INVARIANT=1
   export VLLM_DS4_DECODE_KERNEL=sparse
   export VERL_FULL_DETERMINISM=1
+  export VLLM_BATCH_INVARIANT_KERNEL_LIB
   MODE_ARGS=(
     actor_rollout_ref.actor.engine.impl=vllm
     +actor_rollout_ref.actor.engine.seed="${SEED}"
@@ -144,13 +148,13 @@ if [[ "${EXACT_ALIGNMENT}" == 1 ]]; then
     +actor_rollout_ref.rollout.engine_kwargs.vllm.linear_backend=deep_gemm
   )
 else
+  : "${ROLLOUT_MOE_BACKEND:=auto}"
   export VLLM_BATCH_INVARIANT=0
   export VLLM_DS4_DECODE_KERNEL=paged
   export VERL_FULL_DETERMINISM=0
+  unset VLLM_BATCH_INVARIANT_KERNEL_LIB
   MODE_ARGS=(
-    actor_rollout_ref.actor.engine.attention_backend_override=fused
-    +actor_rollout_ref.actor.engine.impl_cfg.use_deepep=True
-    actor_rollout_ref.actor.engine.router_replay_mode=R3
+    actor_rollout_ref.actor.megatron.router_replay.mode=R3
     actor_rollout_ref.rollout.enable_rollout_routing_replay=True
   )
 fi
@@ -238,7 +242,59 @@ fi
 
 ROLLOUT_TP="${ROLLOUT_TP:-1}"
 MAX_MODEL_LEN=$((MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH))
-ROLLOUT_MAX_NUM_BATCHED_TOKENS="${ROLLOUT_MAX_NUM_BATCHED_TOKENS:-2048}"
+ACTOR_ARGS=(
+  actor_rollout_ref.actor.engine.pp="${ACTOR_PP}"
+  actor_rollout_ref.actor.engine.cp="${ACTOR_CP}"
+  actor_rollout_ref.actor.engine.ep="${ACTOR_EP}"
+  '~actor_rollout_ref.actor.engine.grad_offload'
+  '~actor_rollout_ref.ref.engine.grad_offload'
+  actor_rollout_ref.actor.engine.load_hf_weights=True
+  +actor_rollout_ref.actor.engine.cross_entropy_fusion=True
+  actor_rollout_ref.actor.engine.resync_format=block_fp8
+  +actor_rollout_ref.actor.engine.resync_config.expert_dtype=fp8
+  +actor_rollout_ref.actor.engine.impl_cfg.recompute=full
+)
+ENGINE_ARGS=("hydra.searchpath=[file://${runtime_config_root},pkg://verl_mlite.config]" model_engine=mlite)
+if [[ "${MODE}" == baseline-r3 ]]; then
+  [[ "${HARDWARE}" == gb200 ]] || die "MXFP8 baseline requires Blackwell; use --hardware gb200"
+  [[ "${ACTOR_OPTIMIZER}" == dist_opt ]] || die "Megatron baseline requires dist_opt"
+  ENGINE_ARGS=(model_engine=megatron)
+  ACTOR_ARGS=(
+    actor_rollout_ref.actor.megatron.tensor_model_parallel_size=1
+    actor_rollout_ref.actor.megatron.pipeline_model_parallel_size="${ACTOR_PP}"
+    actor_rollout_ref.actor.megatron.context_parallel_size="${ACTOR_CP}"
+    actor_rollout_ref.actor.megatron.expert_model_parallel_size="${ACTOR_EP}"
+    actor_rollout_ref.actor.megatron.expert_tensor_parallel_size=1
+    ++actor_rollout_ref.actor.megatron.override_transformer_config.fp8=e4m3
+    ++actor_rollout_ref.actor.megatron.override_transformer_config.fp8_recipe=mxfp8
+    ++actor_rollout_ref.actor.megatron.override_transformer_config.fp8_param=False
+    ++actor_rollout_ref.actor.megatron.override_transformer_config.disable_parameter_transpose_cache=True
+    ++actor_rollout_ref.actor.megatron.override_transformer_config.apply_dsa_kernel_fusion=True
+    ++actor_rollout_ref.actor.megatron.override_transformer_config.dsa_indexer_use_sparse_loss=True
+    ++actor_rollout_ref.actor.megatron.override_transformer_config.dsa_indexer_loss_coeff=0.0
+    ++actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method=uniform
+    ++actor_rollout_ref.actor.megatron.override_transformer_config.recompute_granularity=full
+    ++actor_rollout_ref.actor.megatron.override_transformer_config.recompute_num_layers=1
+    ++actor_rollout_ref.actor.megatron.override_transformer_config.use_fused_mhc=False
+    ++actor_rollout_ref.actor.megatron.override_ddp_config.fp8_param_gather=False
+    ++actor_rollout_ref.actor.megatron.override_ddp_config.reuse_grad_buf_for_mxfp8_param_ag=False
+  )
+  if (( ACTOR_CP > 1 )); then
+    ACTOR_ARGS+=(
+      ++actor_rollout_ref.actor.megatron.override_transformer_config.cp_partition_mode=contiguous
+      ++actor_rollout_ref.actor.megatron.override_transformer_config.sequence_packing_scheduler=dp_balanced
+      ++actor_rollout_ref.actor.megatron.override_transformer_config.max_seqlen_per_dp_cp_rank="$((MAX_MODEL_LEN / ACTOR_CP))"
+    )
+  fi
+  OPTIMIZER_ARGS=(
+    actor_rollout_ref.actor.megatron.param_offload=False
+    actor_rollout_ref.actor.megatron.optimizer_offload=True
+    +actor_rollout_ref.actor.optim.override_optimizer_config.optimizer_offload_fraction=0.75
+    +actor_rollout_ref.actor.optim.override_optimizer_config.optimizer_cpu_offload=True
+    +actor_rollout_ref.actor.optim.override_optimizer_config.overlap_cpu_optimizer_d2h_h2d=False
+    +actor_rollout_ref.actor.optim.override_optimizer_config.reuse_grad_buf_for_mxfp8_param_ag=False
+  )
+fi
 OUTPUT_ROOT="${OUTPUT_ROOT:-/workspace/outputs/ds4_true_on_policy_preview/${HARDWARE}/${MODE}}"
 RUN_NAME="${RUN_NAME:-ds4_v4_${HARDWARE}_${MODE//-/_}}"
 CKPT_DIR="${CKPT_DIR:-${OUTPUT_ROOT}/checkpoints/${RUN_NAME}}"
@@ -256,7 +312,6 @@ mkdir -p \
 export VERL_FILE_LOGGER_PATH="${JSONL_FILE}"
 
 # --- Internal container/Ray environment; normally do not edit ---
-export CUDA_DEVICE_MAX_CONNECTIONS=1
 export RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES=1
 export PATH="/opt/ds4-venv/bin:/usr/local/cuda/bin:/usr/bin:/bin"
 export PYTHONNOUSERSITE=1
@@ -288,15 +343,18 @@ fi
 # Exporting in this launcher is not enough for an existing Ray cluster.
 RAY_ENV_NAMES=(
   PATH PYTHONPATH LD_LIBRARY_PATH
-  PYTHONNOUSERSITE CUDA_DEVICE_MAX_CONNECTIONS
+  PYTHONNOUSERSITE
   RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES
   PYTHONHASHSEED VLLM_BATCH_INVARIANT VERL_FULL_DETERMINISM
-  VLLM_BATCH_INVARIANT_KERNEL_LIB DS4_BI_TOPK_LIB
+  VERL_ROLLOUT_DISABLE_DEBUG_FILL
   DEEPEP_MAX_NVL_PEERS NVSHMEM_MAX_TEAMS NVSHMEM_DISABLE_NCCL
   VLLM_DEEPEP_BUFFER_SIZE_MB
   ACTOR_MOE_DISPATCHER NUM_OF_HYBRID_EP_RANKS_PER_NVLINK_DOMAIN
   VLLM_DS4_DECODE_KERNEL VERL_FILE_LOGGER_PATH
 )
+if [[ "${EXACT_ALIGNMENT}" == 1 ]]; then
+  RAY_ENV_NAMES+=(VLLM_BATCH_INVARIANT_KERNEL_LIB)
+fi
 RAY_RUNTIME_ENV=()
 for name in "${RAY_ENV_NAMES[@]}"; do
   RAY_RUNTIME_ENV+=(
@@ -313,7 +371,8 @@ if (( NNODES > 1 )); then
   done
 fi
 
-for name in WANDB_ENTITY WANDB_MODE WANDB_BASE_URL; do
+for name in WANDB_ENTITY WANDB_MODE WANDB_BASE_URL \
+  VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL NCCL_MNNVL_ENABLE; do
   if [[ -v "${name}" ]]; then
     RAY_RUNTIME_ENV+=(
       "+ray_kwargs.ray_init.runtime_env.env_vars.${name}=\"${!name}\""
@@ -330,9 +389,10 @@ fi
 if [[ "${DRY_RUN:-0}" != 1 ]]; then
   [[ "${DEEPEP_MAX_NVL_PEERS}" == "${NGPUS_PER_NODE}" ]] ||
     die "DEEPEP_MAX_NVL_PEERS must equal NGPUS_PER_NODE"
-  [[ -s "${VLLM_BATCH_INVARIANT_KERNEL_LIB}" ]] ||
-    die "missing batch-invariant kernel"
-  [[ -s "${DS4_BI_TOPK_LIB}" ]] || die "missing deterministic top-k kernel"
+  if [[ "${EXACT_ALIGNMENT}" == 1 ]]; then
+    [[ -s "${VLLM_BATCH_INVARIANT_KERNEL_LIB}" ]] ||
+      die "missing batch-invariant kernel"
+  fi
   IFS=, read -r -a train_files <<<"${TRAIN_FILES}"
   IFS=, read -r -a val_files <<<"${VAL_FILES}"
   for file in "${train_files[@]}"; do
@@ -361,7 +421,7 @@ HYDRA_ARGS=(
   data.truncation=error
   +data.apply_chat_template_kwargs.enable_thinking=True
 
-  # Model and mLite actor.
+  # Model and shared actor settings.
   actor_rollout_ref.model.path="${MODEL_PATH}"
   actor_rollout_ref.model.trust_remote_code=True
   actor_rollout_ref.model.use_fused_kernels=True
@@ -381,16 +441,6 @@ HYDRA_ARGS=(
   actor_rollout_ref.actor.clip_ratio_low=0.2
   actor_rollout_ref.actor.clip_ratio_high=0.28
   actor_rollout_ref.actor.clip_ratio_c=10.0
-  actor_rollout_ref.actor.engine.pp="${ACTOR_PP}"
-  actor_rollout_ref.actor.engine.cp="${ACTOR_CP}"
-  actor_rollout_ref.actor.engine.ep="${ACTOR_EP}"
-  '~actor_rollout_ref.actor.engine.grad_offload'
-  '~actor_rollout_ref.ref.engine.grad_offload'
-  actor_rollout_ref.actor.engine.load_hf_weights=True
-  +actor_rollout_ref.actor.engine.cross_entropy_fusion=True
-  actor_rollout_ref.actor.engine.resync_format=block_fp8
-  +actor_rollout_ref.actor.engine.resync_config.expert_dtype=fp8
-  +actor_rollout_ref.actor.engine.impl_cfg.recompute=full
 
   # vLLM rollout.
   actor_rollout_ref.rollout.name=vllm
@@ -415,15 +465,13 @@ HYDRA_ARGS=(
   +actor_rollout_ref.rollout.engine_kwargs.vllm.disable_custom_all_reduce=True
   +actor_rollout_ref.rollout.engine_kwargs.vllm.worker_extension_cls="${VLLM_WORKER_EXTENSION}"
   +actor_rollout_ref.rollout.engine_kwargs.vllm.kv_cache_dtype=fp8
-  +actor_rollout_ref.rollout.engine_kwargs.vllm.moe_backend=deep_gemm
+  +actor_rollout_ref.rollout.engine_kwargs.vllm.moe_backend="${ROLLOUT_MOE_BACKEND}"
   +actor_rollout_ref.rollout.engine_kwargs.vllm.hf_overrides.expert_dtype=fp8
   +actor_rollout_ref.rollout.engine_kwargs.vllm.hf_overrides.quantization_config.activation_scheme=dynamic
   +actor_rollout_ref.rollout.engine_kwargs.vllm.hf_overrides.quantization_config.fmt=e4m3
   +actor_rollout_ref.rollout.engine_kwargs.vllm.hf_overrides.quantization_config.quant_method=fp8
   +actor_rollout_ref.rollout.engine_kwargs.vllm.hf_overrides.quantization_config.scale_fmt=ue8m0
   +actor_rollout_ref.rollout.engine_kwargs.vllm.hf_overrides.quantization_config.weight_block_size='[128,128]'
-  +actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config='{cudagraph_mode:FULL_DECODE_ONLY}'
-
   # Reward and trainer.
   reward.reward_manager.name=dapo
   +reward.reward_kwargs.overlong_buffer_cfg.enable=True
@@ -445,9 +493,9 @@ HYDRA_ARGS=(
 # --- Launch ---
 COMMAND=(
   python3 -m verl.trainer.main_ppo
-  "hydra.searchpath=[file://${runtime_config_root},pkg://verl_mlite.config]"
-  model_engine=mlite
+  "${ENGINE_ARGS[@]}"
   "${HYDRA_ARGS[@]}"
+  "${ACTOR_ARGS[@]}"
   "${OPTIMIZER_ARGS[@]}"
   "${MODE_ARGS[@]}"
   "${RAY_RUNTIME_ENV[@]}"
