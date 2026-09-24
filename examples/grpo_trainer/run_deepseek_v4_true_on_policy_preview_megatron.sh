@@ -26,7 +26,6 @@ export VERL_ROLLOUT_DISABLE_DEBUG_FILL="${VERL_ROLLOUT_DISABLE_DEBUG_FILL:-1}"
 ACTOR_LR="${ACTOR_LR:-1e-6}"
 MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-2048}"
 PROJECT_NAME="${PROJECT_NAME:-verl-ds4-v4-preview}"
-ACTOR_OPTIMIZER="${ACTOR_OPTIMIZER:-dist_opt}"
 
 VLLM_BATCH_INVARIANT_KERNEL_LIB="${VLLM_BATCH_INVARIANT_KERNEL_LIB:-/opt/ds4/kernels/_vllm_batch_invariant_C.so}"
 
@@ -113,6 +112,11 @@ case "${MODE}" in
     ;;
 esac
 
+if [[ "${MODE}" == baseline-r3 ]]; then
+  : "${ACTOR_OPTIMIZER:=dist_opt}"
+else
+  : "${ACTOR_OPTIMIZER:=fsdp2}"
+fi
 case "${ACTOR_OPTIMIZER}" in
   dist_opt|fsdp2) ;;
   *) die "ACTOR_OPTIMIZER must be dist_opt or fsdp2, got '${ACTOR_OPTIMIZER}'" ;;
@@ -161,7 +165,7 @@ fi
 
 OPTIMIZER_ARGS=(
   +actor_rollout_ref.actor.engine.impl_cfg.optimizer="${ACTOR_OPTIMIZER}"
-  actor_rollout_ref.actor.engine.param_offload=True
+  actor_rollout_ref.actor.engine.param_offload=False
   actor_rollout_ref.actor.engine.optimizer_offload=True
   +actor_rollout_ref.actor.optim.override_optimizer_config.offload_fraction=1.0
   +actor_rollout_ref.actor.optim.override_optimizer_config.use_precision_aware_optimizer=True
