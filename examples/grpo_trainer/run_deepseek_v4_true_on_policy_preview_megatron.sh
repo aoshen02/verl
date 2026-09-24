@@ -267,6 +267,7 @@ if [[ "${MODE}" == baseline-r3 ]]; then
     actor_rollout_ref.actor.megatron.pipeline_model_parallel_size="${ACTOR_PP}"
     actor_rollout_ref.actor.megatron.context_parallel_size="${ACTOR_CP}"
     actor_rollout_ref.actor.megatron.expert_model_parallel_size="${ACTOR_EP}"
+    actor_rollout_ref.actor.megatron.param_offload=False
     ++actor_rollout_ref.actor.megatron.override_transformer_config.fp8=e4m3
     ++actor_rollout_ref.actor.megatron.override_transformer_config.fp8_recipe=mxfp8
     ++actor_rollout_ref.actor.megatron.override_transformer_config.dsa_indexer_loss_coeff=0.0
