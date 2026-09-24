@@ -160,6 +160,7 @@ else
   MODE_ARGS=(
     actor_rollout_ref.actor.megatron.router_replay.mode=R3
     actor_rollout_ref.rollout.enable_rollout_routing_replay=True
+    +actor_rollout_ref.rollout.engine_kwargs.vllm.all2all_backend=flashinfer_nvlink_two_sided
   )
 fi
 
