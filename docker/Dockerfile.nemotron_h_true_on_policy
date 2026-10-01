@@ -1,0 +1,173 @@
+# syntax=docker/dockerfile:1.7
+#
+# Unified training + rollout image for
+# examples/grpo_trainer/run_nemotron_h_lightning_nvfp4_true_on_policy_megatron.sh
+#
+# vLLM, Megatron-LM (megatron.core, megatron.lite, verl_mlite) and verl are
+# built from exact commits and installed into one venv; the image needs no
+# source mounts, overlays, sitecustomize hooks or launch-time patches.
+#
+#   docker buildx build --platform linux/arm64 \
+#     -f docker/Dockerfile.nemotron_h_true_on_policy \
+#     --build-arg VLLM_REVISION=<sha> --build-arg MEGATRON_REVISION=<sha> \
+#     --build-arg VERL_REVISION=<sha> -t verl:nemotron-h-true-on-policy .
+
+# -----------------------------------------------------------------------------
+# Base image and release pins
+# -----------------------------------------------------------------------------
+ARG BASE_IMAGE=nvcr.io/nvidia/pytorch:26.07-py3
+ARG BASE_IMAGE_DIGEST=sha256:2140e699b3beaf7f96a0081fd9c9406bc3832b435cdb60dfa2d261f7d2f34a1c
+ARG TARGETARCH=arm64
+
+ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
+ARG VLLM_REVISION=0000000000000000000000000000000000000000
+ARG MEGATRON_REPO=https://github.com/NVIDIA/Megatron-LM.git
+ARG MEGATRON_REVISION=0000000000000000000000000000000000000000
+ARG VERL_REPO=https://github.com/verl-project/verl.git
+ARG VERL_REVISION=0000000000000000000000000000000000000000
+ARG TORCH_VERSION_PREFIX=2.13.
+ARG MAX_JOBS=64
+
+# -----------------------------------------------------------------------------
+# Builder
+# -----------------------------------------------------------------------------
+FROM ${BASE_IMAGE}@${BASE_IMAGE_DIGEST} AS builder
+ARG TARGETARCH
+ARG VLLM_REPO
+ARG VLLM_REVISION
+ARG MEGATRON_REPO
+ARG MEGATRON_REVISION
+ARG VERL_REPO
+ARG VERL_REVISION
+ARG TORCH_VERSION_PREFIX
+ARG MAX_JOBS
+
+ENV VIRTUAL_ENV=/opt/venv \
+    PATH=/opt/venv/bin:/usr/local/bin:/usr/local/cuda/bin:/usr/bin:/bin \
+    MAX_JOBS=${MAX_JOBS} CMAKE_BUILD_PARALLEL_LEVEL=${MAX_JOBS} \
+    PIP_NO_CACHE_DIR=1 PYTHONDONTWRITEBYTECODE=1
+WORKDIR /src
+
+# x86_64: H100 (SM90), B200 (SM100), B300 (SM103); arm64: GB200, GB300.
+RUN <<'EOF'
+set -eux
+case "${TARGETARCH}" in
+  amd64) torch_archs='9.0a;10.0a;10.3a' ;;
+  arm64) torch_archs='10.0a;10.3a' ;;
+  *) exit 64 ;;
+esac
+printf "export TORCH_CUDA_ARCH_LIST='%s'\n" "${torch_archs}" >/tmp/arch.env
+
+clone_exact() {
+  git init "/src/$1"
+  git -C "/src/$1" remote add origin "$2"
+  git -C "/src/$1" fetch --depth 1 origin "$3"
+  git -C "/src/$1" checkout --detach "$3"
+  test "$(git -C "/src/$1" rev-parse HEAD)" = "$3"
+}
+clone_exact vllm "${VLLM_REPO}" "${VLLM_REVISION}"
+clone_exact Megatron-LM "${MEGATRON_REPO}" "${MEGATRON_REVISION}"
+clone_exact verl "${VERL_REPO}" "${VERL_REVISION}"
+
+python3 -c "import torch, sys; sys.exit(not torch.__version__.startswith('${TORCH_VERSION_PREFIX}'))"
+python3 -m pip install uv==0.12.5
+uv venv --seed --system-site-packages --python "$(command -v python3)" "${VIRTUAL_ENV}"
+EOF
+
+# -----------------------------------------------------------------------------
+# vLLM wheel from the pinned tree, against the base image's torch
+# -----------------------------------------------------------------------------
+RUN --mount=type=cache,target=/root/.cache/uv <<'EOF'
+set -eux
+. /tmp/arch.env
+cd /src/vllm
+for req in requirements/build/cuda.txt requirements/cuda.txt; do
+  grep -vE '^(torch|torchaudio|torchvision)([=<> ]|$)' "${req}" >"${req%.txt}-image.txt"
+done
+uv pip install build -r requirements/build/cuda-image.txt
+uv pip install -r requirements/cuda-image.txt
+mkdir -p /tmp/wheels
+python -m build --wheel --no-isolation --outdir /tmp/wheels /src/vllm
+uv pip install --no-deps /tmp/wheels/vllm-*.whl
+mkdir -p /opt/nemotron
+sha256sum /tmp/wheels/vllm-*.whl | cut -d' ' -f1 >/opt/nemotron/vllm-wheel.sha256
+EOF
+
+# -----------------------------------------------------------------------------
+# Megatron-LM: megatron.core, megatron.lite and the verl_mlite engine package
+# -----------------------------------------------------------------------------
+RUN --mount=type=cache,target=/root/.cache/uv <<'EOF'
+set -eux
+. /tmp/arch.env
+lite=/src/Megatron-LM/experimental/lite
+test -f "${lite}/pyproject.toml"
+test -f "${lite}/examples/verl/pyproject.toml"
+uv pip install --no-build-isolation --no-deps /src/Megatron-LM
+uv pip install --no-build-isolation --no-deps "${lite}"
+uv pip install --no-build-isolation --no-deps "${lite}/examples/verl"
+EOF
+
+# -----------------------------------------------------------------------------
+# verl with its runtime dependencies, never replacing torch or vLLM
+# -----------------------------------------------------------------------------
+RUN --mount=type=cache,target=/root/.cache/uv <<'EOF'
+set -eux
+uv pip freeze | grep -iE '^(torch|torchvision|torchaudio|vllm|flashinfer-python|transformers|megatron-core)==' \
+  >/tmp/constraints.txt
+uv pip install -c /tmp/constraints.txt "/src/verl[verl-core]"
+EOF
+
+# -----------------------------------------------------------------------------
+# Build smoke test, provenance and cleanup
+# -----------------------------------------------------------------------------
+RUN <<'EOF'
+set -eux
+python - <<'PY'
+import importlib.util
+import pathlib
+import sys
+
+import megatron.lite.model.nemotron_h.protocol  # noqa: F401
+import torch
+import verl.trainer.main_ppo  # noqa: F401
+import verl_mlite.engine  # noqa: F401
+import vllm
+
+assert importlib.util.find_spec("verl_mlite.config") is not None
+spec = importlib.util.find_spec("sitecustomize")
+if spec is not None and spec.origin:
+    assert "verl_mlite" not in pathlib.Path(spec.origin).read_text(), spec.origin
+print(sys.version, torch.__version__, vllm.__version__)
+PY
+for pkg in verl vllm megatron-core; do uv pip show "${pkg}" >/dev/null; done
+printf '{"schema":"nemotron-h-true-on-policy-image/v1","vllm_revision":"%s","megatron_revision":"%s","verl_revision":"%s","vllm_wheel_sha256":"%s"}\n' \
+  "${VLLM_REVISION}" "${MEGATRON_REVISION}" "${VERL_REVISION}" \
+  "$(cat /opt/nemotron/vllm-wheel.sha256)" >/opt/nemotron/image-manifest.json
+uv pip freeze >/opt/nemotron/pip-freeze.txt
+rm -rf /src /tmp/wheels /tmp/arch.env /tmp/constraints.txt /root/.cache
+EOF
+
+# -----------------------------------------------------------------------------
+# Runtime image
+# -----------------------------------------------------------------------------
+FROM ${BASE_IMAGE}@${BASE_IMAGE_DIGEST} AS runtime
+ARG TARGETARCH
+ARG BASE_IMAGE_DIGEST
+ARG VLLM_REVISION
+ARG MEGATRON_REVISION
+ARG VERL_REVISION
+ENV VIRTUAL_ENV=/opt/venv \
+    PATH=/opt/venv/bin:/usr/local/bin:/usr/local/cuda/bin:/usr/bin:/bin \
+    PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends rdma-core libibverbs1 pciutils procps && \
+    rm -rf /var/lib/apt/lists/*
+COPY --from=builder /opt/venv /opt/venv
+COPY --from=builder /opt/nemotron /opt/nemotron
+LABEL org.opencontainers.image.title="verl-nemotron-h-true-on-policy" \
+      ai.nemotron.arch="${TARGETARCH}" \
+      ai.nemotron.base.digest="${BASE_IMAGE_DIGEST}" \
+      ai.nemotron.vllm.revision="${VLLM_REVISION}" \
+      ai.nemotron.megatron.revision="${MEGATRON_REVISION}" \
+      ai.nemotron.verl.revision="${VERL_REVISION}"
+WORKDIR /workspace
