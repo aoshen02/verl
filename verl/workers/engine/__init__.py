@@ -69,3 +69,11 @@ except ImportError as e:
     warnings.warn(f"megatron engine is not available: {e!r}", stacklevel=1)
     MegatronEngine = None
     MegatronEngineWithLMHead = None
+
+try:
+    from .megatron_lite import MegatronLiteEngine
+
+    __all__ += ["MegatronLiteEngine"]
+except ImportError as e:
+    warnings.warn(f"megatron_lite engine is not available: {e!r}", stacklevel=1)
+    MegatronLiteEngine = None
