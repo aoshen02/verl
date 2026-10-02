@@ -6,7 +6,8 @@
 # Runs inside the image from docker/Dockerfile.nemotron_h_true_on_policy, which
 # installs pinned vLLM, Megatron-LM (megatron.lite + verl_mlite) and verl.
 # Nothing is mounted or patched at run time; verl_mlite is selected through
-# Hydra (`pkg://verl_mlite.config`, `actor@actor_rollout_ref.actor=mlite_actor`)
+# Hydra (`pkg://verl_mlite.config`, `actor@actor_rollout_ref.actor=mlite_actor`,
+# `engine.impl=vllm`: the vLLM-aligned Nemotron-H implementation)
 # and its engine registers itself via `engine.custom_backend_module`.
 #
 # Topology (GB200, 4 GPUs/node; colocated hybrid engine on one node):
@@ -234,6 +235,7 @@ ACTOR=(
   actor_rollout_ref.actor.optim.weight_decay="${WEIGHT_DECAY}"
   actor_rollout_ref.actor.optim.betas="${BETAS}"
   actor_rollout_ref.actor.optim.clip_grad="${CLIP_GRAD}"
+  actor_rollout_ref.actor.engine.impl=vllm
   actor_rollout_ref.actor.engine.tp=1
   actor_rollout_ref.actor.engine.etp=1
   actor_rollout_ref.actor.engine.ep=1
