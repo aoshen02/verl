@@ -159,7 +159,9 @@ fi
 # --- Process environment (propagated to every Ray worker below) ---
 export VLLM_BATCH_INVARIANT=1
 export VLLM_USE_V2_MODEL_RUNNER=1
-export VLLM_HUMMING_MOE_GEMM_TYPE="${VLLM_HUMMING_MOE_GEMM_TYPE:-indexed}"
+# Batch-invariant Humming serving needs the indexed GEMM; do not inherit an
+# image default.
+export VLLM_HUMMING_MOE_GEMM_TYPE=indexed
 export PYTHONHASHSEED="${SEED}"
 export PYTHONNOUSERSITE=1
 export PYTHONUNBUFFERED=1
@@ -245,6 +247,8 @@ ACTOR=(
   actor_rollout_ref.actor.optim.betas="${BETAS}"
   actor_rollout_ref.actor.optim.clip_grad="${CLIP_GRAD}"
   actor_rollout_ref.actor.engine.impl=vllm
+  '~actor_rollout_ref.actor.engine.grad_offload'
+  '~actor_rollout_ref.ref.engine.grad_offload'
   actor_rollout_ref.actor.engine.tp=1
   actor_rollout_ref.actor.engine.etp=1
   actor_rollout_ref.actor.engine.ep=1
