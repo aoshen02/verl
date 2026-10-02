@@ -53,7 +53,7 @@ PPO_MINI_BATCH_SIZE="${PPO_MINI_BATCH_SIZE:-32}"
 PPO_MICRO_BATCH_SIZE_PER_GPU="${PPO_MICRO_BATCH_SIZE_PER_GPU:-1}"
 MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-2048}"
 MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-14000}"
-ENABLE_THINKING="${ENABLE_THINKING:-False}"
+ENABLE_THINKING="${ENABLE_THINKING:-True}"
 NORM_ADV_BY_STD="${NORM_ADV_BY_STD:-False}"
 FILTER_GROUPS="${FILTER_GROUPS:-False}"
 FILTER_GROUPS_METRIC="${FILTER_GROUPS_METRIC:-acc}"
@@ -102,7 +102,7 @@ ROLLOUT_MAX_NUM_SEQS="${ROLLOUT_MAX_NUM_SEQS:-128}"
 ROLLOUT_MAX_NUM_BATCHED_TOKENS="${ROLLOUT_MAX_NUM_BATCHED_TOKENS:-16384}"
 ROLLOUT_GPU_MEMORY_UTILIZATION="${ROLLOUT_GPU_MEMORY_UTILIZATION:-0.7}"
 ROLLOUT_ENABLE_PREFIX_CACHING="${ROLLOUT_ENABLE_PREFIX_CACHING:-False}"
-ROLLOUT_WORKER_EXTENSION_CLS="${ROLLOUT_WORKER_EXTENSION_CLS:-}"
+ROLLOUT_WORKER_EXTENSION_CLS="${ROLLOUT_WORKER_EXTENSION_CLS-verl_mlite.rollout.layerwise_reload.LayerwiseReloadWorkerExtension}"
 ROLLOUT_AGENT_WORKERS="${ROLLOUT_AGENT_WORKERS:-8}"
 
 # --- Outputs ---
@@ -208,6 +208,7 @@ DATA=(
   data.train_files="${TRAIN_FILES}"
   data.val_files="${VAL_FILES}"
   data.train_batch_size="${TRAIN_BATCH_SIZE}"
+  data.dataloader_num_workers=0
   data.max_prompt_length="${MAX_PROMPT_LENGTH}"
   data.max_response_length="${MAX_RESPONSE_LENGTH}"
   data.prompt_key=prompt
@@ -269,6 +270,8 @@ ACTOR=(
   +actor_rollout_ref.actor.engine.impl_cfg.routed_vjp_token_limit="${MLITE_ROUTED_VJP_TOKEN_LIMIT}"
   +actor_rollout_ref.actor.engine.impl_cfg.routed_forward_reduction="${MLITE_ROUTED_FORWARD_REDUCTION}"
   +actor_rollout_ref.actor.optim.override_optimizer_config.offload_fraction=1.0
+  +actor_rollout_ref.actor.optim.override_optimizer_config.use_precision_aware_optimizer=True
+  +actor_rollout_ref.actor.optim.override_optimizer_config.decoupled_weight_decay=True
 )
 
 ROLLOUT=(
