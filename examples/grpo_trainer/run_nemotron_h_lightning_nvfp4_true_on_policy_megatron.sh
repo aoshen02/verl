@@ -85,7 +85,7 @@ ROLLOUT_DP="${ROLLOUT_DP:-4}"
 ROLLOUT_EP="${ROLLOUT_EP:-4}"
 
 # --- Megatron Lite NVFP4 actor contract ---
-MLITE_SURROGATE_CONTRACT="${MLITE_SURROGATE_CONTRACT:-moe-fixedscale-grouped-bf16edges-v2}"
+MLITE_SURROGATE_CONTRACT="${MLITE_SURROGATE_CONTRACT:-moe-fixedscale-grouped-tf32rz-bf16edges-v3}"
 MLITE_ROUTED_VJP_BACKEND="${MLITE_ROUTED_VJP_BACKEND:-compact-f32-tma-nosplit}"
 MLITE_ROUTED_VJP_TOKEN_LIMIT="${MLITE_ROUTED_VJP_TOKEN_LIMIT:-16384}"
 # Dynamic micro-batches pack whole sequences; without context parallelism one
