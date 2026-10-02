@@ -313,7 +313,7 @@ REWARD=(
 
 TRAINER=(
   critic.enable=False
-  trainer.use_v1=True
+  trainer.use_v1=False
   trainer.logger="${TRAINER_LOGGERS}"
   trainer.project_name="${PROJECT_NAME}"
   trainer.experiment_name="${RUN_NAME}"
