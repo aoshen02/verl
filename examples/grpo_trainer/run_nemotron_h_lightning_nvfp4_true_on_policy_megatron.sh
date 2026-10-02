@@ -41,19 +41,22 @@ MODEL_REVISION="${MODEL_REVISION:-bee7596271d1495f6992ae224aefde4410e816b8}"
 TRAIN_FILES_SHA256="${TRAIN_FILES_SHA256:-}"
 TRUST_REMOTE_CODE="${TRUST_REMOTE_CODE:-False}"
 
-# --- Algorithm and data (DAPO) ---
+# --- Algorithm and data ---
+# Batch, lengths and optimizer follow the DeepSeek-V4 true on-policy recipe
+# (examples/grpo_trainer/run_deepseek_v4_true_on_policy_preview_megatron.sh,
+# aligned mode).
 SEED="${SEED:-42}"
-TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-32}"
-ROLLOUT_N="${ROLLOUT_N:-16}"
+TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-128}"
+ROLLOUT_N="${ROLLOUT_N:-8}"
 PPO_MINI_BATCH_SIZE="${PPO_MINI_BATCH_SIZE:-32}"
 PPO_MICRO_BATCH_SIZE_PER_GPU="${PPO_MICRO_BATCH_SIZE_PER_GPU:-1}"
 MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-2048}"
-MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-2048}"
+MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-14000}"
 ENABLE_THINKING="${ENABLE_THINKING:-False}"
-NORM_ADV_BY_STD="${NORM_ADV_BY_STD:-True}"
-FILTER_GROUPS="${FILTER_GROUPS:-True}"
+NORM_ADV_BY_STD="${NORM_ADV_BY_STD:-False}"
+FILTER_GROUPS="${FILTER_GROUPS:-False}"
 FILTER_GROUPS_METRIC="${FILTER_GROUPS_METRIC:-acc}"
-OVERLONG_BUFFER_LEN="${OVERLONG_BUFFER_LEN:-1024}"
+OVERLONG_BUFFER_LEN="${OVERLONG_BUFFER_LEN:-4096}"
 OVERLONG_PENALTY_FACTOR="${OVERLONG_PENALTY_FACTOR:-1.0}"
 CLIP_RATIO_LOW="${CLIP_RATIO_LOW:-0.2}"
 CLIP_RATIO_HIGH="${CLIP_RATIO_HIGH:-0.28}"
@@ -67,7 +70,7 @@ LR_WARMUP_STEPS="${LR_WARMUP_STEPS:-0}"
 LR_DECAY_STYLE="${LR_DECAY_STYLE:-constant}"
 LR_DECAY_STEPS="${LR_DECAY_STEPS:-null}"
 WEIGHT_DECAY="${WEIGHT_DECAY:-0.1}"
-BETAS="${BETAS:-[0.9,0.999]}"
+BETAS="${BETAS:-[0.9,0.95]}"
 CLIP_GRAD="${CLIP_GRAD:-1.0}"
 TOTAL_EPOCHS="${TOTAL_EPOCHS:-1}"
 ACCEPTANCE_STEPS="${ACCEPTANCE_STEPS:-}"
@@ -83,15 +86,18 @@ ROLLOUT_EP="${ROLLOUT_EP:-4}"
 # --- Megatron Lite NVFP4 actor contract ---
 MLITE_SURROGATE_CONTRACT="${MLITE_SURROGATE_CONTRACT:-moe-fixedscale-grouped-bf16edges-v2}"
 MLITE_ROUTED_VJP_BACKEND="${MLITE_ROUTED_VJP_BACKEND:-compact-f32-tma-nosplit}"
-MLITE_ROUTED_VJP_TOKEN_LIMIT="${MLITE_ROUTED_VJP_TOKEN_LIMIT:-9216}"
+MLITE_ROUTED_VJP_TOKEN_LIMIT="${MLITE_ROUTED_VJP_TOKEN_LIMIT:-16384}"
+# Dynamic micro-batches pack whole sequences; without context parallelism one
+# micro-batch must hold the longest sequence and stay within the VJP bound.
+PPO_MAX_TOKEN_LEN_PER_GPU="${PPO_MAX_TOKEN_LEN_PER_GPU:-16384}"
 MLITE_ROUTED_FORWARD_REDUCTION="${MLITE_ROUTED_FORWARD_REDUCTION:-ep4-fi-onesided-fp32-top6-first-rank-v1}"
 
 # --- vLLM rollout (historical serving configuration) ---
 ROLLOUT_MOE_BACKEND="${ROLLOUT_MOE_BACKEND:-humming}"
 ROLLOUT_ALL2ALL_BACKEND="${ROLLOUT_ALL2ALL_BACKEND:-flashinfer_nvlink_one_sided}"
 ROLLOUT_KV_CACHE_DTYPE="${ROLLOUT_KV_CACHE_DTYPE:-fp8_e4m3}"
-ROLLOUT_MAX_MODEL_LEN="${ROLLOUT_MAX_MODEL_LEN:-9216}"
-ROLLOUT_MAX_NUM_SEQS="${ROLLOUT_MAX_NUM_SEQS:-64}"
+ROLLOUT_MAX_MODEL_LEN="${ROLLOUT_MAX_MODEL_LEN:-$((MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH))}"
+ROLLOUT_MAX_NUM_SEQS="${ROLLOUT_MAX_NUM_SEQS:-128}"
 ROLLOUT_MAX_NUM_BATCHED_TOKENS="${ROLLOUT_MAX_NUM_BATCHED_TOKENS:-16384}"
 ROLLOUT_GPU_MEMORY_UTILIZATION="${ROLLOUT_GPU_MEMORY_UTILIZATION:-0.7}"
 ROLLOUT_ENABLE_PREFIX_CACHING="${ROLLOUT_ENABLE_PREFIX_CACHING:-False}"
@@ -119,8 +125,10 @@ fi
   die "rollout TP*DP must equal NGPUS_PER_NODE"
 (( MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH <= ROLLOUT_MAX_MODEL_LEN )) ||
   die "prompt+response exceeds ROLLOUT_MAX_MODEL_LEN"
-(( MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH <= MLITE_ROUTED_VJP_TOKEN_LIMIT )) ||
-  die "prompt+response exceeds MLITE_ROUTED_VJP_TOKEN_LIMIT"
+(( MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH <= PPO_MAX_TOKEN_LEN_PER_GPU )) ||
+  die "prompt+response exceeds PPO_MAX_TOKEN_LEN_PER_GPU"
+(( PPO_MAX_TOKEN_LEN_PER_GPU <= MLITE_ROUTED_VJP_TOKEN_LIMIT )) ||
+  die "PPO_MAX_TOKEN_LEN_PER_GPU exceeds MLITE_ROUTED_VJP_TOKEN_LIMIT"
 TOTAL_TRAINING_STEPS=null
 if [[ -n "${ACCEPTANCE_STEPS}" ]]; then
   # Capping the run must not rescale the schedule: warmup is in absolute
@@ -208,7 +216,8 @@ ACTOR=(
   actor_rollout_ref.actor.ppo_mini_batch_size="${PPO_MINI_BATCH_SIZE}"
   actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu="${PPO_MICRO_BATCH_SIZE_PER_GPU}"
   actor_rollout_ref.actor.ppo_epochs=1
-  actor_rollout_ref.actor.use_dynamic_bsz=False
+  actor_rollout_ref.actor.use_dynamic_bsz=True
+  actor_rollout_ref.actor.ppo_max_token_len_per_gpu="${PPO_MAX_TOKEN_LEN_PER_GPU}"
   actor_rollout_ref.actor.use_kl_loss=False
   actor_rollout_ref.actor.kl_loss_coef=0.0
   actor_rollout_ref.actor.entropy_coeff=0
@@ -262,6 +271,7 @@ ROLLOUT=(
   actor_rollout_ref.rollout.logprobs_mode=raw_logprobs
   actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=False
   actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=1
+  actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu="${PPO_MAX_TOKEN_LEN_PER_GPU}"
   actor_rollout_ref.rollout.full_determinism=False
   actor_rollout_ref.rollout.seed="${SEED}"
   actor_rollout_ref.rollout.max_model_len="${ROLLOUT_MAX_MODEL_LEN}"
@@ -271,6 +281,7 @@ ROLLOUT=(
   actor_rollout_ref.rollout.enable_chunked_prefill=True
   actor_rollout_ref.rollout.enable_prefix_caching="${ROLLOUT_ENABLE_PREFIX_CACHING}"
   actor_rollout_ref.rollout.free_cache_engine=True
+  actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=1024
   +actor_rollout_ref.rollout.engine_kwargs.vllm.moe_backend="${ROLLOUT_MOE_BACKEND}"
   +actor_rollout_ref.rollout.engine_kwargs.vllm.all2all_backend="${ROLLOUT_ALL2ALL_BACKEND}"
   +actor_rollout_ref.rollout.engine_kwargs.vllm.kv_cache_dtype="${ROLLOUT_KV_CACHE_DTYPE}"
