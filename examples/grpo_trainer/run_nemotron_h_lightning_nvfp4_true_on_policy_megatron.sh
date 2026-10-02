@@ -6,8 +6,8 @@
 # Runs inside the image from docker/Dockerfile.nemotron_h_true_on_policy, which
 # installs pinned vLLM, Megatron-LM (megatron.lite + verl_mlite) and verl.
 # Nothing is mounted or patched at run time; verl_mlite is selected through
-# Hydra (`pkg://verl_mlite.config`, `actor@actor_rollout_ref.actor=mlite_actor`,
-# `engine.impl=vllm`: the vLLM-aligned Nemotron-H implementation)
+# Hydra (`pkg://verl_mlite.config` and `model_engine=mlite`, as the DeepSeek-V4
+# recipe does; `engine.impl=vllm` is the vLLM-aligned Nemotron-H implementation)
 # and its engine registers itself via `engine.custom_backend_module`.
 #
 # Topology (GB200, 4 GPUs/node; colocated hybrid engine on one node):
@@ -176,6 +176,16 @@ for name in "${RAY_ENV_NAMES[@]}"; do
   RAY_RUNTIME_ENV+=("+ray_kwargs.ray_init.runtime_env.env_vars.${name}=\"${!name}\"")
 done
 
+# model_engine=mlite selects mlite_actor/mlite_ref from verl_mlite; the critic
+# group needs a disabled mlite entry of its own.
+runtime_config_root="$(mktemp -d "${TMPDIR:-/tmp}/nemotron-h-config.XXXXXX")"
+trap 'rm -rf "${runtime_config_root}"' EXIT
+mkdir -p "${runtime_config_root}/critic" "${runtime_config_root}/model_engine"
+printf '%s\n' '# @package _global_' 'model_engine: mlite' \
+  >"${runtime_config_root}/model_engine/mlite.yaml"
+printf '%s\n' '_target_: verl.workers.config.CriticConfig' 'enable: false' 'strategy: mlite' \
+  >"${runtime_config_root}/critic/mlite_critic.yaml"
+
 ROLLOUT_EXTRA=()
 if [[ -n "${ROLLOUT_WORKER_EXTENSION_CLS}" ]]; then
   ROLLOUT_EXTRA+=("+actor_rollout_ref.rollout.engine_kwargs.vllm.worker_extension_cls=${ROLLOUT_WORKER_EXTENSION_CLS}")
@@ -213,7 +223,6 @@ MODEL=(
 )
 
 ACTOR=(
-  actor@actor_rollout_ref.actor=mlite_actor
   actor_rollout_ref.actor.ppo_mini_batch_size="${PPO_MINI_BATCH_SIZE}"
   actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu="${PPO_MICRO_BATCH_SIZE_PER_GPU}"
   actor_rollout_ref.actor.ppo_epochs=1
@@ -317,7 +326,8 @@ TRAINER=(
 
 COMMAND=(
   python3 -m verl.trainer.main_ppo
-  "hydra.searchpath=[pkg://verl_mlite.config]"
+  "hydra.searchpath=[file://${runtime_config_root},pkg://verl_mlite.config]"
+  model_engine=mlite
   "${ALGORITHM[@]}"
   "${DATA[@]}"
   "${MODEL[@]}"
