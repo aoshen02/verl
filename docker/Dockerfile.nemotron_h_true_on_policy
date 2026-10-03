@@ -89,8 +89,12 @@ cd /src/vllm
 # vLLM's supported way to build against a preinstalled torch: drop the torch
 # pins from requirements and pyproject.toml.
 python tools/use_existing_torch.py
-uv pip install build -r requirements/build/cuda.txt
-uv pip install -r requirements/cuda.txt
+# uv does not count the base image's packages as installed, so drop the
+# requirements that must come from it instead of shadowing them in the venv.
+printf '%s; sys_platform == "never"\n' torch torchvision torchaudio triton \
+  >/tmp/base-image-packages.txt
+uv pip install --override /tmp/base-image-packages.txt build -r requirements/build/cuda.txt
+uv pip install --override /tmp/base-image-packages.txt -r requirements/cuda.txt
 mkdir -p /tmp/wheels
 python -m build --wheel --no-isolation --outdir /tmp/wheels /src/vllm
 uv pip install --no-deps /tmp/wheels/vllm-*.whl
@@ -120,7 +124,7 @@ set -eux
 uv pip freeze | grep -iE '^(torch|torchvision|torchaudio|vllm|flashinfer-python|transformers|megatron-core)==' \
   >/tmp/constraints.txt
 # verl caps transformers below the version vLLM main requires; keep vLLM's.
-grep -i '^transformers==' /tmp/constraints.txt >/tmp/overrides.txt
+grep -i '^transformers==' /tmp/constraints.txt | cat - /tmp/base-image-packages.txt >/tmp/overrides.txt
 uv pip install -c /tmp/constraints.txt --override /tmp/overrides.txt "/src/verl[verl-core]"
 EOF
 
