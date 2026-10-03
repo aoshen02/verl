@@ -33,11 +33,11 @@ ARG BASE_IMAGE_DIGEST=sha256:2140e699b3beaf7f96a0081fd9c9406bc3832b435cdb60dfa2d
 ARG TARGETARCH=arm64
 
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
-ARG VLLM_REVISION=5a22d2cb54ae5bf1321143d6ffea35eda07e7aa1
-# What setuptools-scm derives for VLLM_REVISION (v0.30.1rc0-614).
-ARG VLLM_VERSION=0.30.1rc1.dev614+g5a22d2cb5
+ARG VLLM_REVISION=4df59b403f21df3852862383f8cca1c733e835ea
+# What setuptools-scm derives for VLLM_REVISION (v0.30.1rc0-615).
+ARG VLLM_VERSION=0.30.1rc1.dev615+g4df59b403
 ARG MEGATRON_REPO=https://github.com/NVIDIA/Megatron-LM.git
-ARG MEGATRON_REVISION=f0a5cc7fdf469d992d67989fcc90c4b711ba1471
+ARG MEGATRON_REVISION=e6e7e1ec236be9c5b70fb35ca116657a5d48e29f
 ARG TORCH_VERSION_PREFIX=2.13.
 ARG MAX_JOBS=64
 # Megatron-Core's Mamba kernels; mamba-ssm needs the state_dtype argument
