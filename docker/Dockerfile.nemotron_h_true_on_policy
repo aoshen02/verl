@@ -48,6 +48,11 @@ ENV VIRTUAL_ENV=/opt/venv \
     PIP_NO_CACHE_DIR=1 PYTHONDONTWRITEBYTECODE=1
 WORKDIR /src
 
+# vLLM's DeepGEMM JIT runtime includes elfutils/libdwfl.h.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends libdw-dev && \
+    rm -rf /var/lib/apt/lists/*
+
 # x86_64: H100 (SM90), B200 (SM100), B300 (SM103); arm64: GB200, GB300.
 RUN <<'EOF'
 set -eux
@@ -160,7 +165,7 @@ ENV VIRTUAL_ENV=/opt/venv \
     PATH=/opt/venv/bin:/usr/local/bin:/usr/local/cuda/bin:/usr/bin:/bin \
     PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends rdma-core libibverbs1 pciutils procps && \
+    apt-get install -y --no-install-recommends rdma-core libibverbs1 pciutils procps libdw1 && \
     rm -rf /var/lib/apt/lists/*
 COPY --from=builder /opt/venv /opt/venv
 COPY --from=builder /opt/nemotron /opt/nemotron
