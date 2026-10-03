@@ -267,7 +267,7 @@ for so in "${site}"/causal_conv1d_cuda*.so "${site}"/selective_scan_cuda*.so; do
   cuobjdump --list-elf "${so}" >/tmp/elf.txt
   grep -Eq '\.sm_100a?\.' /tmp/elf.txt
 done
-MODEL_PATH=/stub/nvfp4 BF16_MASTER_PATH=/stub/bf16 TRAIN_FILES=/stub/train.parquet \
+MODEL_PATH=/stub/nvfp4 BF16_MASTER_PATH=/stub/bf16 TRAIN_FILES=/stub/train.parquet VAL_FILES=/stub/val.parquet \
   COMPOSE_ONLY=1 bash /opt/nemotron/recipe/run_nemotron_h_lightning_nvfp4_true_on_policy_megatron.sh \
   >/tmp/compose.log
 rm -rf /tmp/cuda-stubs /tmp/elf.txt /tmp/compose.log
