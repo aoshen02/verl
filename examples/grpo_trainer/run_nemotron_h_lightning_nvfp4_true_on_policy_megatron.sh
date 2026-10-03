@@ -124,6 +124,10 @@ ROLLOUT_EP="${ROLLOUT_EP:-4}"
 # Dynamic micro-batches pack whole sequences; without context parallelism one
 # micro-batch must hold the longest sequence.
 PPO_MAX_TOKEN_LEN_PER_GPU="${PPO_MAX_TOKEN_LEN_PER_GPU:-16384}"
+# Host RAM the run adds on a 4-GPU node, measured on GB200 (full model, BF16
+# masters, CPU-offloaded optimizer): 734 GiB at the end of the first update.
+# 0 disables the check.
+HOST_MEM_MIN_GIB="${HOST_MEM_MIN_GIB:-760}"
 MLITE_ROUTED_FORWARD_REDUCTION="${MLITE_ROUTED_FORWARD_REDUCTION:-ep4-fi-onesided-fp32-top6-first-rank-v1}"
 
 # --- vLLM rollout (historical serving configuration) ---
@@ -217,6 +221,10 @@ if [[ "${DRY_RUN:-0}" != 1 && "${COMPOSE_ONLY:-0}" != 1 ]]; then
   verify_files "${VAL_FILES}" "${VAL_FILES_SHA256}" VAL_FILES_SHA256
   if [[ "${NNODES}" -gt 1 ]]; then
     : "${RAY_ADDRESS:?multi-node runs require an existing Ray cluster}"
+  elif (( HOST_MEM_MIN_GIB > 0 )); then
+    available_gib=$(( $(awk '/^MemAvailable:/ {print $2}' /proc/meminfo) / 1048576 ))
+    (( available_gib >= HOST_MEM_MIN_GIB )) ||
+      die "host RAM available ${available_gib} GiB < ${HOST_MEM_MIN_GIB} GiB the CPU-offloaded optimizer needs; free the node or set HOST_MEM_MIN_GIB"
   fi
   mkdir -p "${OUTPUT_ROOT}" "${CKPT_DIR}" "$(dirname "${LOG_FILE}")" "$(dirname "${JSONL_FILE}")"
 fi
