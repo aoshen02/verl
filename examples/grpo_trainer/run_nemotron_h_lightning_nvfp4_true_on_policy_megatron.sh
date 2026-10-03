@@ -25,8 +25,11 @@
 # sha256 manifests of their pinned revisions (nemotron_h_true_on_policy/
 # manifests), every data file against its sha256.
 #
-# ACCEPTANCE_STEPS=N stops after N trainer iterations without changing data,
-# lengths, batch, rollout or the LR schedule. Each iteration makes
+# The formal run follows the DeepSeek-V4 aligned mode: 100 trainer iterations,
+# a checkpoint every 5 and validation every 10 (VAL_FILES, e.g. AIME 2024, is
+# then required). ACCEPTANCE_STEPS=N instead stops after N iterations without
+# changing data, lengths, batch, rollout or the LR schedule, and by default
+# neither saves nor validates. Each iteration makes
 # TRAIN_BATCH_SIZE / PPO_MINI_BATCH_SIZE optimizer updates (4 by default).
 #
 # Deviations from the DeepSeek-V4 aligned recipe:
@@ -110,6 +113,7 @@ WEIGHT_DECAY="${WEIGHT_DECAY:-0.1}"
 BETAS="${BETAS:-[0.9,0.95]}"
 CLIP_GRAD="${CLIP_GRAD:-1.0}"
 TOTAL_EPOCHS="${TOTAL_EPOCHS:-1}"
+TOTAL_TRAINING_STEPS="${TOTAL_TRAINING_STEPS:-100}"
 ACCEPTANCE_STEPS="${ACCEPTANCE_STEPS:-}"
 
 # --- Topology ---
@@ -151,8 +155,14 @@ OUTPUT_ROOT="${OUTPUT_ROOT:-/workspace/outputs/nemotron_h_true_on_policy}"
 CKPT_DIR="${CKPT_DIR:-${OUTPUT_ROOT}/checkpoints/${RUN_NAME}}"
 LOG_FILE="${LOG_FILE:-${OUTPUT_ROOT}/${RUN_NAME}.log}"
 JSONL_FILE="${JSONL_FILE:-${OUTPUT_ROOT}/${RUN_NAME}.jsonl}"
-SAVE_FREQ="${SAVE_FREQ:--1}"
-TEST_FREQ="${TEST_FREQ:--1}"
+if [[ -n "${ACCEPTANCE_STEPS}" ]]; then
+  SAVE_FREQ="${SAVE_FREQ:--1}"
+  TEST_FREQ="${TEST_FREQ:--1}"
+else
+  SAVE_FREQ="${SAVE_FREQ:-5}"
+  TEST_FREQ="${TEST_FREQ:-10}"
+fi
+RESUME_MODE="${RESUME_MODE:-auto}"
 if (( TEST_FREQ > 0 )); then
   : "${VAL_FILES:?TEST_FREQ>0 needs an explicit held-out VAL_FILES}"
   [[ "${VAL_FILES}" != "${TRAIN_FILES}" ]] || die "VAL_FILES must not be the training files"
@@ -176,7 +186,6 @@ fi
   die "prompt+response exceeds PPO_MAX_TOKEN_LEN_PER_GPU"
 [[ -n "${ROLLOUT_WORKER_EXTENSION_CLS}" ]] ||
   die "ROLLOUT_WORKER_EXTENSION_CLS must name the quantized-reload worker extension"
-TOTAL_TRAINING_STEPS=null
 if [[ -n "${ACCEPTANCE_STEPS}" ]]; then
   # Capping the run must not rescale the schedule: warmup is in absolute
   # steps, and any decay must be anchored to the formal run with LR_DECAY_STEPS.
@@ -223,6 +232,12 @@ if [[ "${DRY_RUN:-0}" != 1 && "${COMPOSE_ONLY:-0}" != 1 ]]; then
     : "${RAY_ADDRESS:?multi-node runs require an existing Ray cluster}"
   elif (( HOST_MEM_MIN_GIB > 0 )); then
     available_gib=$(( $(awk '/^MemAvailable:/ {print $2}' /proc/meminfo) / 1048576 ))
+    # A container memory limit (cgroup v2) caps what the run can use.
+    cgroup_max="$(cat /sys/fs/cgroup/memory.max 2>/dev/null || echo max)"
+    if [[ "${cgroup_max}" =~ ^[0-9]+$ ]]; then
+      cgroup_gib=$(( (cgroup_max - $(cat /sys/fs/cgroup/memory.current)) / 1073741824 ))
+      if (( cgroup_gib < available_gib )); then available_gib="${cgroup_gib}"; fi
+    fi
     (( available_gib >= HOST_MEM_MIN_GIB )) ||
       die "host RAM available ${available_gib} GiB < ${HOST_MEM_MIN_GIB} GiB the CPU-offloaded optimizer needs; free the node or set HOST_MEM_MIN_GIB"
   fi
@@ -385,7 +400,7 @@ TRAINER=(
   trainer.save_freq="${SAVE_FREQ}"
   trainer.test_freq="${TEST_FREQ}"
   trainer.val_before_train=False
-  trainer.resume_mode=disable
+  trainer.resume_mode="${RESUME_MODE}"
   trainer.default_local_dir="${CKPT_DIR}"
 )
 

@@ -33,11 +33,11 @@ ARG BASE_IMAGE_DIGEST=sha256:2140e699b3beaf7f96a0081fd9c9406bc3832b435cdb60dfa2d
 ARG TARGETARCH=arm64
 
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
-ARG VLLM_REVISION=4df59b403f21df3852862383f8cca1c733e835ea
-# What setuptools-scm derives for VLLM_REVISION (v0.30.1rc0-615).
-ARG VLLM_VERSION=0.30.1rc1.dev615+g4df59b403
+ARG VLLM_REVISION=efac69c04c2e275fc2be3bb8d0c31f6291aa4935
+# What setuptools-scm derives for VLLM_REVISION (v0.30.1rc0-617).
+ARG VLLM_VERSION=0.30.1rc1.dev617+gefac69c04
 ARG MEGATRON_REPO=https://github.com/NVIDIA/Megatron-LM.git
-ARG MEGATRON_REVISION=e6e7e1ec236be9c5b70fb35ca116657a5d48e29f
+ARG MEGATRON_REVISION=33a5040c4fe39122aa96ecb4028c9d90dd108aac
 ARG TORCH_VERSION_PREFIX=2.13.
 ARG MAX_JOBS=64
 # Megatron-Core's Mamba kernels; mamba-ssm needs the state_dtype argument
@@ -249,9 +249,12 @@ for module in (torch, triton):
     assert module.__file__.startswith(base), module.__file__
 assert not list(pathlib.Path("/opt/venv").rglob("torch-*.dist-info"))
 assert importlib.util.find_spec("verl_mlite.config") is not None
-spec = importlib.util.find_spec("sitecustomize")
-if spec is not None and spec.origin:
-    assert "verl_mlite" not in pathlib.Path(spec.origin).read_text(), spec.origin
+for hook in ("sitecustomize", "usercustomize"):
+    spec = importlib.util.find_spec(hook)
+    if spec is not None and spec.origin:
+        assert "verl_mlite" not in pathlib.Path(spec.origin).read_text(), spec.origin
+for pth in pathlib.Path("/opt/venv/lib/python3.12/site-packages").glob("*.pth"):
+    assert "verl_mlite" not in pth.read_text(), pth
 assert vllm.__version__ == os.environ["VLLM_VERSION"], vllm.__version__
 print(sys.version, torch.__version__, vllm.__version__)
 PY
