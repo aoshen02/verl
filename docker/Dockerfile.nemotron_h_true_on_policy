@@ -119,7 +119,9 @@ RUN --mount=type=cache,target=/root/.cache/uv <<'EOF'
 set -eux
 uv pip freeze | grep -iE '^(torch|torchvision|torchaudio|vllm|flashinfer-python|transformers|megatron-core)==' \
   >/tmp/constraints.txt
-uv pip install -c /tmp/constraints.txt "/src/verl[verl-core]"
+# verl caps transformers below the version vLLM main requires; keep vLLM's.
+grep -i '^transformers==' /tmp/constraints.txt >/tmp/overrides.txt
+uv pip install -c /tmp/constraints.txt --override /tmp/overrides.txt "/src/verl[verl-core]"
 EOF
 
 # -----------------------------------------------------------------------------
