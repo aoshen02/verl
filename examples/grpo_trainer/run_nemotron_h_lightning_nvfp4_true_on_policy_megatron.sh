@@ -243,7 +243,7 @@ ACTOR=(
   actor_rollout_ref.actor.optim.betas="${BETAS}"
   actor_rollout_ref.actor.optim.clip_grad="${CLIP_GRAD}"
   actor_rollout_ref.actor.engine.impl=vllm
-  '~actor_rollout_ref.actor.engine.grad_offload'
+  actor_rollout_ref.actor.engine.grad_offload=True
   '~actor_rollout_ref.ref.engine.grad_offload'
   actor_rollout_ref.actor.engine.tp=1
   actor_rollout_ref.actor.engine.etp=1
@@ -251,6 +251,8 @@ ACTOR=(
   actor_rollout_ref.actor.engine.cp=1
   actor_rollout_ref.actor.engine.vpp=1
   actor_rollout_ref.actor.engine.pp="${ACTOR_PP}"
+  # Parameters stay resident (as in the DeepSeek-V4 recipe); the FP32 gradient
+  # buffers are released while the rollout owns the GPU.
   actor_rollout_ref.actor.engine.param_offload=False
   actor_rollout_ref.actor.engine.optimizer_offload=True
   actor_rollout_ref.actor.engine.load_hf_weights=True
