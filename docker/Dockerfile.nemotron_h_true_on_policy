@@ -9,8 +9,13 @@
 #
 #   docker buildx build --platform linux/arm64 \
 #     -f docker/Dockerfile.nemotron_h_true_on_policy \
-#     --build-arg VLLM_REVISION=<sha> --build-arg MEGATRON_REVISION=<sha> \
-#     --build-arg VERL_REVISION=<sha> -t verl:nemotron-h-true-on-policy .
+#     --build-arg VLLM_REVISION=<sha> --build-arg VLLM_VERSION=<version> \
+#     --build-arg MEGATRON_REVISION=<sha> --build-arg VERL_REVISION=<sha> \
+#     -t verl:nemotron-h-true-on-policy .
+#
+# VLLM_VERSION is what setuptools-scm would derive from the full history, e.g.
+# 0.30.1rc1.dev619+gd18c84400 for `git describe` v0.30.1rc0-619-gd18c844002;
+# the shallow clone has no tags.
 
 # -----------------------------------------------------------------------------
 # Base image and release pins
@@ -21,6 +26,7 @@ ARG TARGETARCH=arm64
 
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
 ARG VLLM_REVISION=0000000000000000000000000000000000000000
+ARG VLLM_VERSION=
 ARG MEGATRON_REPO=https://github.com/NVIDIA/Megatron-LM.git
 ARG MEGATRON_REVISION=0000000000000000000000000000000000000000
 ARG VERL_REPO=https://github.com/verl-project/verl.git
@@ -39,6 +45,7 @@ FROM ${BASE_IMAGE}@${BASE_IMAGE_DIGEST} AS builder
 ARG TARGETARCH
 ARG VLLM_REPO
 ARG VLLM_REVISION
+ARG VLLM_VERSION
 ARG MEGATRON_REPO
 ARG MEGATRON_REVISION
 ARG VERL_REPO
@@ -102,7 +109,8 @@ printf '%s; sys_platform == "never"\n' torch torchvision torchaudio triton \
 uv pip install --override /tmp/base-image-packages.txt build -r requirements/build/cuda.txt
 uv pip install --override /tmp/base-image-packages.txt -r requirements/cuda.txt
 mkdir -p /tmp/wheels
-python -m build --wheel --no-isolation --outdir /tmp/wheels /src/vllm
+test -n "${VLLM_VERSION}"
+SETUPTOOLS_SCM_PRETEND_VERSION="${VLLM_VERSION}" python -m build --wheel --no-isolation --outdir /tmp/wheels /src/vllm
 uv pip install --no-deps /tmp/wheels/vllm-*.whl
 mkdir -p /opt/nemotron
 sha256sum /tmp/wheels/vllm-*.whl | cut -d' ' -f1 >/opt/nemotron/vllm-wheel.sha256
@@ -141,7 +149,10 @@ uv pip freeze | grep -iE '^(torch|torchvision|torchaudio|vllm|flashinfer-python|
   >/tmp/constraints.txt
 # verl caps transformers below the version vLLM main requires; keep vLLM's.
 grep -i '^transformers==' /tmp/constraints.txt | cat - /tmp/base-image-packages.txt >/tmp/overrides.txt
-uv pip install -c /tmp/constraints.txt --override /tmp/overrides.txt "/src/verl[verl-core]"
+# The Megatron Lite verl config resolves `oc.select` defaults that are dicts,
+# which needs omegaconf 2.4 (hydra-core 1.4); the DeepSeek-V4 recipe pins the same.
+uv pip install -c /tmp/constraints.txt --override /tmp/overrides.txt "/src/verl[verl-core]" \
+  hydra-core==1.4.0.dev8
 EOF
 
 # -----------------------------------------------------------------------------
@@ -154,6 +165,7 @@ mkdir -p /tmp/cuda-stubs
 ln -s /usr/local/cuda/lib64/stubs/libcuda.so /tmp/cuda-stubs/libcuda.so.1
 LD_LIBRARY_PATH=/tmp/cuda-stubs${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}} python - <<'PY'
 import importlib.util
+import os
 import pathlib
 import sys
 
@@ -169,6 +181,7 @@ assert importlib.util.find_spec("verl_mlite.config") is not None
 spec = importlib.util.find_spec("sitecustomize")
 if spec is not None and spec.origin:
     assert "verl_mlite" not in pathlib.Path(spec.origin).read_text(), spec.origin
+assert vllm.__version__ == os.environ["VLLM_VERSION"], vllm.__version__
 print(sys.version, torch.__version__, vllm.__version__)
 PY
 for pkg in verl vllm megatron-core causal-conv1d mamba-ssm; do uv pip show "${pkg}" >/dev/null; done
