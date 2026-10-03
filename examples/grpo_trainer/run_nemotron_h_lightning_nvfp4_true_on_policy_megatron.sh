@@ -23,7 +23,7 @@ set -euo pipefail
 
 usage() {
   echo "usage: $0 [Hydra overrides...]"
-  echo "required env: MODEL_PATH TRAIN_FILES"
+  echo "required env: MODEL_PATH BF16_MASTER_PATH TRAIN_FILES"
   echo "optional env: VAL_FILES OUTPUT_ROOT ACCEPTANCE_STEPS DRY_RUN COMPOSE_ONLY ..."
 }
 
@@ -36,6 +36,10 @@ die() {
 
 # --- Inputs ---
 : "${MODEL_PATH:?set MODEL_PATH to the Nemotron-H Lightning NVFP4 checkpoint}"
+# The BF16 release the NVFP4 checkpoint was quantized from
+# (NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16@a9904d24): the actor's initial
+# BF16 masters. The actor refuses a release that is not the checkpoint's source.
+: "${BF16_MASTER_PATH:?set BF16_MASTER_PATH to the Nemotron-H Lightning BF16 release}"
 : "${TRAIN_FILES:?set TRAIN_FILES to the DAPO-Math-17k parquet/jsonl}"
 VAL_FILES="${VAL_FILES:-${TRAIN_FILES}}"
 MODEL_REVISION="${MODEL_REVISION:-bee7596271d1495f6992ae224aefde4410e816b8}"
@@ -136,6 +140,7 @@ fi
 
 if [[ "${DRY_RUN:-0}" != 1 ]]; then
   [[ -s "${MODEL_PATH}/config.json" ]] || die "missing ${MODEL_PATH}/config.json"
+  [[ -s "${BF16_MASTER_PATH}/config.json" ]] || die "missing ${BF16_MASTER_PATH}/config.json"
   IFS=, read -r -a train_files <<<"${TRAIN_FILES}"
   IFS=, read -r -a val_files <<<"${VAL_FILES}"
   for file in "${train_files[@]}" "${val_files[@]}"; do
@@ -262,6 +267,7 @@ ACTOR=(
   +actor_rollout_ref.actor.engine.seed="${SEED}"
   +actor_rollout_ref.actor.engine.impl_cfg.optimizer=dist_opt
   +actor_rollout_ref.actor.engine.impl_cfg.routed_forward_reduction="${MLITE_ROUTED_FORWARD_REDUCTION}"
+  +actor_rollout_ref.actor.engine.impl_cfg.bf16_master_path="${BF16_MASTER_PATH}"
   +actor_rollout_ref.actor.optim.override_optimizer_config.offload_fraction=1.0
   +actor_rollout_ref.actor.optim.override_optimizer_config.use_precision_aware_optimizer=True
   +actor_rollout_ref.actor.optim.override_optimizer_config.decoupled_weight_decay=True
