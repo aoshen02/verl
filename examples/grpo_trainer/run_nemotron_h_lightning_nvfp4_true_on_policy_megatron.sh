@@ -16,7 +16,7 @@
 #
 # Topology (GB200, 4 GPUs/node; colocated hybrid engine on one node):
 #   actor:   Megatron Lite PP4, TP1/EP1/CP1, dense DP1, dist_opt
-#   rollout: vLLM TP1 DP4 EP4, Humming W4A16 MoE, FlashInfer one-sided all2all
+#   rollout: vLLM TP1 DP4 EP4, FlashInfer CuTe-DSL W4A16 MoE, FlashInfer one-sided all2all
 # The Megatron Lite NVFP4 actor requires world size == PP == 4.
 # Containers need the IMEX channel (/dev/nvidia-caps-imex-channels) for the
 # FlashInfer one-sided all2all.
@@ -134,8 +134,10 @@ PPO_MAX_TOKEN_LEN_PER_GPU="${PPO_MAX_TOKEN_LEN_PER_GPU:-16384}"
 HOST_MEM_MIN_GIB="${HOST_MEM_MIN_GIB:-760}"
 MLITE_ROUTED_FORWARD_REDUCTION="${MLITE_ROUTED_FORWARD_REDUCTION:-ep4-fi-onesided-fp32-top6-first-rank-v1}"
 
-# --- vLLM rollout (historical serving configuration) ---
-ROLLOUT_MOE_BACKEND="${ROLLOUT_MOE_BACKEND:-humming}"
+# --- vLLM rollout ---
+# Routed experts: FlashInfer CuTe-DSL W4A16 (batch invariant, one pinned
+# tactic); the actor calls the same kernel (impl_cfg.routed_expert_backend).
+ROLLOUT_MOE_BACKEND="${ROLLOUT_MOE_BACKEND:-flashinfer_cutedsl}"
 ROLLOUT_ALL2ALL_BACKEND="${ROLLOUT_ALL2ALL_BACKEND:-flashinfer_nvlink_one_sided}"
 ROLLOUT_KV_CACHE_DTYPE="${ROLLOUT_KV_CACHE_DTYPE:-fp8_e4m3}"
 ROLLOUT_MAX_MODEL_LEN="${ROLLOUT_MAX_MODEL_LEN:-$((MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH))}"
@@ -342,6 +344,7 @@ ACTOR=(
   +actor_rollout_ref.actor.engine.seed="${SEED}"
   +actor_rollout_ref.actor.engine.impl_cfg.routed_forward_reduction="${MLITE_ROUTED_FORWARD_REDUCTION}"
   +actor_rollout_ref.actor.engine.impl_cfg.bf16_master_path="${BF16_MASTER_PATH}"
+  +actor_rollout_ref.actor.engine.impl_cfg.routed_expert_backend="${ROLLOUT_MOE_BACKEND}"
   +actor_rollout_ref.actor.optim.override_optimizer_config.offload_fraction=1.0
   +actor_rollout_ref.actor.optim.override_optimizer_config.use_precision_aware_optimizer=True
   +actor_rollout_ref.actor.optim.override_optimizer_config.decoupled_weight_decay=True
