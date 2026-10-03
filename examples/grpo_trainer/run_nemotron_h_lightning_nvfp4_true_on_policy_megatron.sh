@@ -130,6 +130,14 @@ ROLLOUT_EP="${ROLLOUT_EP:-4}"
 # Dynamic micro-batches pack whole sequences; without context parallelism one
 # micro-batch must hold the longest sequence.
 PPO_MAX_TOKEN_LEN_PER_GPU="${PPO_MAX_TOKEN_LEN_PER_GPU:-16384}"
+# Activation recompute, as the DeepSeek-V4 aligned recipe (impl_cfg.recompute):
+# with EP4 every rank holds all 52 layers' activations. Bitwise: the
+# recomputed forward reproduces the visible tensors.
+if [[ "${ACTOR_EP}" == 4 ]]; then
+  ACTOR_RECOMPUTE="${ACTOR_RECOMPUTE:-full}"
+else
+  ACTOR_RECOMPUTE="${ACTOR_RECOMPUTE:-none}"
+fi
 # Host RAM the run adds on a 4-GPU node, measured on GB200 (full model, BF16
 # masters, CPU-offloaded optimizer) at the end of the first update: 738 GiB
 # with PP4, 765 GiB with EP4 (dense parameters replicated on four ranks).
@@ -354,6 +362,7 @@ ACTOR=(
   +actor_rollout_ref.actor.engine.impl_cfg.routed_forward_reduction="${MLITE_ROUTED_FORWARD_REDUCTION}"
   +actor_rollout_ref.actor.engine.impl_cfg.bf16_master_path="${BF16_MASTER_PATH}"
   +actor_rollout_ref.actor.engine.impl_cfg.routed_expert_backend="${ROLLOUT_MOE_BACKEND}"
+  +actor_rollout_ref.actor.engine.impl_cfg.recompute="${ACTOR_RECOMPUTE}"
   +actor_rollout_ref.actor.optim.override_optimizer_config.offload_fraction=1.0
   +actor_rollout_ref.actor.optim.override_optimizer_config.use_precision_aware_optimizer=True
   +actor_rollout_ref.actor.optim.override_optimizer_config.decoupled_weight_decay=True
