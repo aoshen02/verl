@@ -256,8 +256,10 @@ assert vllm.__version__ == os.environ["VLLM_VERSION"], vllm.__version__
 print(sys.version, torch.__version__, vllm.__version__)
 PY
 site=/opt/venv/lib/python3.12/site-packages
-cuobjdump --list-elf "${site}/vllm/_C.abi3.so" >/tmp/elf.txt
-grep -q '\.sm_100a\.' /tmp/elf.txt
+for so in "${site}"/vllm/_C_stable_libtorch.abi3.so "${site}"/vllm/_moe_C_stable_libtorch.abi3.so; do
+  cuobjdump --list-elf "${so}" >/tmp/elf.txt
+  grep -q '\.sm_100a\.' /tmp/elf.txt
+done
 for so in "${site}"/causal_conv1d_cuda*.so "${site}"/selective_scan_cuda*.so; do
   cuobjdump --list-elf "${so}" >/tmp/elf.txt
   grep -Eq '\.sm_100a?\.' /tmp/elf.txt
