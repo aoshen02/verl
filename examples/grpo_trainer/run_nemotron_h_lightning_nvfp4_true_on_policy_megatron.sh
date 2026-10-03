@@ -131,9 +131,14 @@ ROLLOUT_EP="${ROLLOUT_EP:-4}"
 # micro-batch must hold the longest sequence.
 PPO_MAX_TOKEN_LEN_PER_GPU="${PPO_MAX_TOKEN_LEN_PER_GPU:-16384}"
 # Host RAM the run adds on a 4-GPU node, measured on GB200 (full model, BF16
-# masters, CPU-offloaded optimizer): 734 GiB at the end of the first update.
+# masters, CPU-offloaded optimizer) at the end of the first update: 738 GiB
+# with PP4, 765 GiB with EP4 (dense parameters replicated on four ranks).
 # 0 disables the check.
-HOST_MEM_MIN_GIB="${HOST_MEM_MIN_GIB:-760}"
+if [[ "${ACTOR_EP}" == 4 ]]; then
+  HOST_MEM_MIN_GIB="${HOST_MEM_MIN_GIB:-780}"
+else
+  HOST_MEM_MIN_GIB="${HOST_MEM_MIN_GIB:-760}"
+fi
 MLITE_ROUTED_FORWARD_REDUCTION="${MLITE_ROUTED_FORWARD_REDUCTION:-ep4-fi-onesided-fp32-top6-first-rank-v1}"
 
 # --- vLLM rollout ---
