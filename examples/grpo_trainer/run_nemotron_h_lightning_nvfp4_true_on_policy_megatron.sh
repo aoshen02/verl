@@ -4,11 +4,15 @@
 # actor produce bitwise-equal response logprobs for the same policy version.
 #
 # Runs inside the image from docker/Dockerfile.nemotron_h_true_on_policy, which
-# installs pinned vLLM, Megatron-LM (megatron.lite + verl_mlite) and verl.
-# Nothing is mounted or patched at run time; verl_mlite is selected through
-# Hydra (`pkg://verl_mlite.config` and `model_engine=mlite`, as the DeepSeek-V4
-# recipe does; `engine.impl=vllm` is the vLLM-aligned Nemotron-H implementation)
-# and its engine registers itself via `engine.custom_backend_module`.
+# installs pinned vLLM, Megatron-LM (megatron.lite + verl_mlite) and verl, and
+# ships this script with nemotron_h_true_on_policy/ (Hydra groups, model
+# manifests) in /opt/nemotron/recipe; nothing is mounted. verl_mlite is selected
+# through Hydra (`pkg://verl_mlite.config` and `model_engine=mlite`, as the
+# DeepSeek-V4 recipe does; `engine.impl=vllm` is the vLLM-aligned Nemotron-H
+# implementation) and its engine registers itself via
+# `engine.custom_backend_module`. The one runtime patch is the DeepSeek-V4
+# recipe's: importing verl_mlite.engine replaces verl's bucketed weight sender
+# (verl_mlite.compat._patch_bucketed_weight_sender).
 #
 # Topology (GB200, 4 GPUs/node; colocated hybrid engine on one node):
 #   actor:   Megatron Lite PP4, TP1/EP1/CP1, dense DP1, dist_opt
@@ -17,14 +21,37 @@
 # Containers need the IMEX channel (/dev/nvidia-caps-imex-channels) for the
 # FlashInfer one-sided all2all.
 #
-# Two-update acceptance: ACCEPTANCE_STEPS=2 stops after two optimizer updates
-# without changing data, lengths, batch, rollout or the LR schedule.
+# Inputs are verified before launch: both checkpoints against the per-file
+# sha256 manifests of their pinned revisions (nemotron_h_true_on_policy/
+# manifests), every data file against its sha256.
+#
+# ACCEPTANCE_STEPS=N stops after N trainer iterations without changing data,
+# lengths, batch, rollout or the LR schedule. Each iteration makes
+# TRAIN_BATCH_SIZE / PPO_MINI_BATCH_SIZE optimizer updates (4 by default).
+#
+# Deviations from the DeepSeek-V4 aligned recipe:
+# - rollout.full_determinism=False: True gives every sample of a request the
+#   same vLLM seed, so the n GRPO samples of a prompt coincide and the
+#   advantages vanish. Bitwise rollout/training agreement comes from
+#   VLLM_BATCH_INVARIANT=1 (set below), not from the VERL_FULL_DETERMINISM,
+#   CUBLAS_WORKSPACE_CONFIG and NCCL_ALGO settings that True would add.
+# - PP4/TP1/EP1/CP1 actor with dist_opt and a 16384-token micro-batch budget:
+#   the NVFP4 actor needs world size == PP; without CP one micro-batch holds
+#   the longest sequence.
+# - Humming W4A16 MoE (indexed GEMM) and FlashInfer one-sided all2all instead
+#   of DeepGEMM/DeepEP; FP8 KV cache, raw logprobs and no prefix caching are
+#   the serving contract the actor replays.
+# - Rollout batched tokens 16384 and memory fraction 0.7; no full recompute or
+#   cross-entropy fusion; use_fused_kernels=False and trust_remote_code=False
+#   (Nemotron-H is native in transformers).
+# Settings that equal current defaults (clipping, KL, entropy, epochs, LR
+# schedule, parallel sizes) are spelled out to pin the contract.
 set -euo pipefail
 
 usage() {
   echo "usage: $0 [Hydra overrides...]"
-  echo "required env: MODEL_PATH BF16_MASTER_PATH TRAIN_FILES"
-  echo "optional env: VAL_FILES OUTPUT_ROOT ACCEPTANCE_STEPS DRY_RUN COMPOSE_ONLY ..."
+  echo "required env: MODEL_PATH BF16_MASTER_PATH TRAIN_FILES TRAIN_FILES_SHA256"
+  echo "optional env: VAL_FILES VAL_FILES_SHA256 OUTPUT_ROOT ACCEPTANCE_STEPS DRY_RUN COMPOSE_ONLY ..."
 }
 
 die() {
@@ -33,6 +60,7 @@ die() {
 }
 
 [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]] && { usage; exit 0; }
+recipe_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/nemotron_h_true_on_policy"
 
 # --- Inputs ---
 : "${MODEL_PATH:?set MODEL_PATH to the Nemotron-H Lightning NVFP4 checkpoint}"
@@ -41,9 +69,13 @@ die() {
 # BF16 masters. The actor refuses a release that is not the checkpoint's source.
 : "${BF16_MASTER_PATH:?set BF16_MASTER_PATH to the Nemotron-H Lightning BF16 release}"
 : "${TRAIN_FILES:?set TRAIN_FILES to the DAPO-Math-17k parquet/jsonl}"
-VAL_FILES="${VAL_FILES:-${TRAIN_FILES}}"
 MODEL_REVISION="${MODEL_REVISION:-bee7596271d1495f6992ae224aefde4410e816b8}"
+BF16_MASTER_REVISION="${BF16_MASTER_REVISION:-a9904d24bcc1d289a1950fa9d2b978c47cf903b9}"
+MODEL_MANIFEST="${MODEL_MANIFEST:-${recipe_dir}/manifests/nvfp4@${MODEL_REVISION}.sha256}"
+BF16_MASTER_MANIFEST="${BF16_MASTER_MANIFEST:-${recipe_dir}/manifests/bf16@${BF16_MASTER_REVISION}.sha256}"
+# Comma-separated, one sha256 per file in TRAIN_FILES / VAL_FILES.
 TRAIN_FILES_SHA256="${TRAIN_FILES_SHA256:-}"
+VAL_FILES_SHA256="${VAL_FILES_SHA256:-}"
 TRUST_REMOTE_CODE="${TRUST_REMOTE_CODE:-False}"
 
 # --- Algorithm and data ---
@@ -103,6 +135,8 @@ ROLLOUT_MAX_NUM_SEQS="${ROLLOUT_MAX_NUM_SEQS:-128}"
 ROLLOUT_MAX_NUM_BATCHED_TOKENS="${ROLLOUT_MAX_NUM_BATCHED_TOKENS:-16384}"
 ROLLOUT_GPU_MEMORY_UTILIZATION="${ROLLOUT_GPU_MEMORY_UTILIZATION:-0.7}"
 ROLLOUT_ENABLE_PREFIX_CACHING="${ROLLOUT_ENABLE_PREFIX_CACHING:-False}"
+# verl's default extension would treat the ModelOpt checkpoint as unquantized
+# and rerun its non-idempotent post-load processing on every weight update.
 ROLLOUT_WORKER_EXTENSION_CLS="${ROLLOUT_WORKER_EXTENSION_CLS-verl_mlite.rollout.layerwise_reload.LayerwiseReloadWorkerExtension}"
 ROLLOUT_AGENT_WORKERS="${ROLLOUT_AGENT_WORKERS:-8}"
 
@@ -115,6 +149,13 @@ LOG_FILE="${LOG_FILE:-${OUTPUT_ROOT}/${RUN_NAME}.log}"
 JSONL_FILE="${JSONL_FILE:-${OUTPUT_ROOT}/${RUN_NAME}.jsonl}"
 SAVE_FREQ="${SAVE_FREQ:--1}"
 TEST_FREQ="${TEST_FREQ:--1}"
+if (( TEST_FREQ > 0 )); then
+  : "${VAL_FILES:?TEST_FREQ>0 needs an explicit held-out VAL_FILES}"
+  [[ "${VAL_FILES}" != "${TRAIN_FILES}" ]] || die "VAL_FILES must not be the training files"
+fi
+# Without validation verl still builds the val dataset; it is never evaluated.
+VAL_FILES="${VAL_FILES:-${TRAIN_FILES}}"
+[[ "${VAL_FILES}" != "${TRAIN_FILES}" || -n "${VAL_FILES_SHA256}" ]] || VAL_FILES_SHA256="${TRAIN_FILES_SHA256}"
 if [[ -z "${TRAINER_LOGGERS:-}" ]]; then
   TRAINER_LOGGERS='[console,file]'
   [[ -v WANDB_API_KEY && "${WANDB_MODE:-}" != disabled ]] && TRAINER_LOGGERS='[console,file,wandb]'
@@ -129,6 +170,8 @@ fi
   die "prompt+response exceeds ROLLOUT_MAX_MODEL_LEN"
 (( MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH <= PPO_MAX_TOKEN_LEN_PER_GPU )) ||
   die "prompt+response exceeds PPO_MAX_TOKEN_LEN_PER_GPU"
+[[ -n "${ROLLOUT_WORKER_EXTENSION_CLS}" ]] ||
+  die "ROLLOUT_WORKER_EXTENSION_CLS must name the quantized-reload worker extension"
 TOTAL_TRAINING_STEPS=null
 if [[ -n "${ACCEPTANCE_STEPS}" ]]; then
   # Capping the run must not rescale the schedule: warmup is in absolute
@@ -138,18 +181,40 @@ if [[ -n "${ACCEPTANCE_STEPS}" ]]; then
   TOTAL_TRAINING_STEPS="${ACCEPTANCE_STEPS}"
 fi
 
-if [[ "${DRY_RUN:-0}" != 1 ]]; then
-  [[ -s "${MODEL_PATH}/config.json" ]] || die "missing ${MODEL_PATH}/config.json"
-  [[ -s "${BF16_MASTER_PATH}/config.json" ]] || die "missing ${BF16_MASTER_PATH}/config.json"
-  IFS=, read -r -a train_files <<<"${TRAIN_FILES}"
-  IFS=, read -r -a val_files <<<"${VAL_FILES}"
-  for file in "${train_files[@]}" "${val_files[@]}"; do
-    [[ -f "${file}" ]] || die "missing data file: ${file}"
+# verify_model <dir> <manifest>: every listed file matches, and no weight or
+# config file is unlisted.
+verify_model() {
+  local dir="$1" manifest unlisted
+  [[ -s "$2" ]] || die "no manifest $2"
+  manifest="$(realpath "$2")"
+  [[ -d "${dir}" ]] || die "missing model directory ${dir}"
+  unlisted="$(cd "${dir}" && find . -maxdepth 1 -type f \( -name '*.safetensors' -o -name '*.json' \) -printf '%f\n' |
+    sort | comm -23 - <(awk '{print $2}' "${manifest}" | sort))"
+  [[ -z "${unlisted}" ]] || die "${dir} has files outside ${manifest}: ${unlisted//$'\n'/ }"
+  awk '{print $2}' "${manifest}" | (cd "${dir}" && xargs -P 16 -n 1 sha256sum) |
+    sort -k2 | diff -q - <(sort -k2 "${manifest}") >/dev/null ||
+    die "${dir} does not match ${manifest}"
+}
+
+# verify_files <comma-separated files> <comma-separated sha256s> <name>
+verify_files() {
+  local -a files sums
+  local i
+  IFS=, read -r -a files <<<"$1"
+  IFS=, read -r -a sums <<<"$2"
+  (( ${#files[@]} == ${#sums[@]} )) || die "set $3 to one sha256 per file"
+  for i in "${!files[@]}"; do
+    [[ -f "${files[i]}" ]] || die "missing data file: ${files[i]}"
+    [[ "$(sha256sum "${files[i]}" | cut -d' ' -f1)" == "${sums[i]}" ]] ||
+      die "sha256 mismatch: ${files[i]}"
   done
-  if [[ -n "${TRAIN_FILES_SHA256}" ]]; then
-    [[ "$(sha256sum "${train_files[0]}" | cut -d' ' -f1)" == "${TRAIN_FILES_SHA256}" ]] ||
-      die "TRAIN_FILES sha256 mismatch"
-  fi
+}
+
+if [[ "${DRY_RUN:-0}" != 1 && "${COMPOSE_ONLY:-0}" != 1 ]]; then
+  verify_model "${MODEL_PATH}" "${MODEL_MANIFEST}"
+  verify_model "${BF16_MASTER_PATH}" "${BF16_MASTER_MANIFEST}"
+  verify_files "${TRAIN_FILES}" "${TRAIN_FILES_SHA256}" TRAIN_FILES_SHA256
+  verify_files "${VAL_FILES}" "${VAL_FILES_SHA256}" VAL_FILES_SHA256
   if [[ "${NNODES}" -gt 1 ]]; then
     : "${RAY_ADDRESS:?multi-node runs require an existing Ray cluster}"
   fi
@@ -162,13 +227,15 @@ export VLLM_USE_V2_MODEL_RUNNER=1
 # Batch-invariant Humming serving needs the indexed GEMM; do not inherit an
 # image default.
 export VLLM_HUMMING_MOE_GEMM_TYPE=indexed
+# Cold starts (no compile caches) take longer than vLLM's 600 s default.
+export VLLM_ENGINE_READY_TIMEOUT_S="${VLLM_ENGINE_READY_TIMEOUT_S:-2400}"
 export PYTHONHASHSEED="${SEED}"
 export PYTHONNOUSERSITE=1
 export PYTHONUNBUFFERED=1
 export VERL_FILE_LOGGER_PATH="${JSONL_FILE}"
 RAY_ENV_NAMES=(
   VLLM_BATCH_INVARIANT VLLM_USE_V2_MODEL_RUNNER VLLM_HUMMING_MOE_GEMM_TYPE
-  PYTHONHASHSEED PYTHONNOUSERSITE VERL_FILE_LOGGER_PATH
+  VLLM_ENGINE_READY_TIMEOUT_S PYTHONHASHSEED PYTHONNOUSERSITE VERL_FILE_LOGGER_PATH
 )
 for name in WANDB_ENTITY WANDB_MODE WANDB_BASE_URL HF_HUB_OFFLINE NCCL_MNNVL_ENABLE; do
   [[ -v "${name}" ]] && RAY_ENV_NAMES+=("${name}")
@@ -178,20 +245,6 @@ for name in "${RAY_ENV_NAMES[@]}"; do
   RAY_RUNTIME_ENV+=("+ray_kwargs.ray_init.runtime_env.env_vars.${name}=\"${!name}\"")
 done
 
-# model_engine=mlite selects mlite_actor/mlite_ref from verl_mlite; the critic
-# group needs a disabled mlite entry of its own.
-runtime_config_root="$(mktemp -d "${TMPDIR:-/tmp}/nemotron-h-config.XXXXXX")"
-trap 'rm -rf "${runtime_config_root}"' EXIT
-mkdir -p "${runtime_config_root}/critic" "${runtime_config_root}/model_engine"
-printf '%s\n' '# @package _global_' 'model_engine: mlite' \
-  >"${runtime_config_root}/model_engine/mlite.yaml"
-printf '%s\n' '_target_: verl.workers.config.CriticConfig' 'enable: false' 'strategy: mlite' \
-  >"${runtime_config_root}/critic/mlite_critic.yaml"
-
-ROLLOUT_EXTRA=()
-if [[ -n "${ROLLOUT_WORKER_EXTENSION_CLS}" ]]; then
-  ROLLOUT_EXTRA+=("+actor_rollout_ref.rollout.engine_kwargs.vllm.worker_extension_cls=${ROLLOUT_WORKER_EXTENSION_CLS}")
-fi
 
 # --- Hydra overrides ---
 ALGORITHM=(
@@ -249,7 +302,6 @@ ACTOR=(
   actor_rollout_ref.actor.optim.clip_grad="${CLIP_GRAD}"
   actor_rollout_ref.actor.engine.impl=vllm
   actor_rollout_ref.actor.engine.grad_offload=True
-  '~actor_rollout_ref.ref.engine.grad_offload'
   actor_rollout_ref.actor.engine.tp=1
   actor_rollout_ref.actor.engine.etp=1
   actor_rollout_ref.actor.engine.ep=1
@@ -265,7 +317,6 @@ ACTOR=(
   actor_rollout_ref.actor.engine.attention_backend_override=null
   +actor_rollout_ref.actor.engine.full_determinism=True
   +actor_rollout_ref.actor.engine.seed="${SEED}"
-  +actor_rollout_ref.actor.engine.impl_cfg.optimizer=dist_opt
   +actor_rollout_ref.actor.engine.impl_cfg.routed_forward_reduction="${MLITE_ROUTED_FORWARD_REDUCTION}"
   +actor_rollout_ref.actor.engine.impl_cfg.bf16_master_path="${BF16_MASTER_PATH}"
   +actor_rollout_ref.actor.optim.override_optimizer_config.offload_fraction=1.0
@@ -301,6 +352,7 @@ ROLLOUT=(
   +actor_rollout_ref.rollout.engine_kwargs.vllm.moe_backend="${ROLLOUT_MOE_BACKEND}"
   +actor_rollout_ref.rollout.engine_kwargs.vllm.all2all_backend="${ROLLOUT_ALL2ALL_BACKEND}"
   +actor_rollout_ref.rollout.engine_kwargs.vllm.kv_cache_dtype="${ROLLOUT_KV_CACHE_DTYPE}"
+  +actor_rollout_ref.rollout.engine_kwargs.vllm.worker_extension_cls="${ROLLOUT_WORKER_EXTENSION_CLS}"
 )
 
 REWARD=(
@@ -331,22 +383,21 @@ TRAINER=(
 
 COMMAND=(
   python3 -m verl.trainer.main_ppo
-  "hydra.searchpath=[file://${runtime_config_root},pkg://verl_mlite.config]"
+  "hydra.searchpath=[file://${recipe_dir}/config,pkg://verl_mlite.config]"
   model_engine=mlite
   "${ALGORITHM[@]}"
   "${DATA[@]}"
   "${MODEL[@]}"
   "${ACTOR[@]}"
   "${ROLLOUT[@]}"
-  "${ROLLOUT_EXTRA[@]}"
   "${REWARD[@]}"
   "${TRAINER[@]}"
   "${RAY_RUNTIME_ENV[@]}"
   "$@"
 )
 
-printf 'MODEL_REVISION=%s TOPOLOGY=%sx%s ACTOR_PP=%s ROLLOUT=TP%s/DP%s/EP%s STEPS=%s\n' \
-  "${MODEL_REVISION}" "${NNODES}" "${NGPUS_PER_NODE}" "${ACTOR_PP}" \
+printf 'MODEL_REVISION=%s BF16_MASTER_REVISION=%s TOPOLOGY=%sx%s ACTOR_PP=%s ROLLOUT=TP%s/DP%s/EP%s STEPS=%s\n' \
+  "${MODEL_REVISION}" "${BF16_MASTER_REVISION}" "${NNODES}" "${NGPUS_PER_NODE}" "${ACTOR_PP}" \
   "${ROLLOUT_TP}" "${ROLLOUT_DP}" "${ROLLOUT_EP}" "${TOTAL_TRAINING_STEPS}"
 
 if [[ "${DRY_RUN:-0}" == 1 ]]; then
@@ -355,8 +406,25 @@ if [[ "${DRY_RUN:-0}" == 1 ]]; then
   exit 0
 fi
 
+# COMPOSE_ONLY=1: what main_ppo does before starting Ray (compose, validate,
+# resolve, build the engine and rollout configs); prints the resolved config.
 if [[ "${COMPOSE_ONLY:-0}" == 1 ]]; then
-  "${COMMAND[@]}" --cfg job --resolve
+  python3 - "${COMMAND[@]:3}" <<'PY'
+import sys
+
+from hydra import compose, initialize_config_module
+from omegaconf import OmegaConf
+
+from verl.trainer.ppo.utils import need_critic, need_reference_policy
+from verl.utils.config import omega_conf_to_dataclass, validate_config
+
+with initialize_config_module("verl.trainer.config", version_base=None):
+    cfg = compose("ppo_trainer", overrides=sys.argv[1:])
+validate_config(cfg, use_reference_policy=need_reference_policy(cfg), use_critic=need_critic(cfg))
+OmegaConf.resolve(cfg)
+omega_conf_to_dataclass(cfg.actor_rollout_ref.rollout)
+print(OmegaConf.to_yaml(cfg))
+PY
   exit 0
 fi
 
