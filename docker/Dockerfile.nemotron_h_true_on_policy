@@ -133,7 +133,10 @@ EOF
 # -----------------------------------------------------------------------------
 RUN <<'EOF'
 set -eux
-python - <<'PY'
+# Transformer Engine loads libcuda at import; the build has no GPU driver.
+mkdir -p /tmp/cuda-stubs
+ln -s /usr/local/cuda/lib64/stubs/libcuda.so /tmp/cuda-stubs/libcuda.so.1
+LD_LIBRARY_PATH=/tmp/cuda-stubs${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}} python - <<'PY'
 import importlib.util
 import pathlib
 import sys
