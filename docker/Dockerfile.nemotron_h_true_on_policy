@@ -81,11 +81,11 @@ RUN --mount=type=cache,target=/root/.cache/uv <<'EOF'
 set -eux
 . /tmp/arch.env
 cd /src/vllm
-for req in requirements/build/cuda.txt requirements/cuda.txt; do
-  grep -vE '^(torch|torchaudio|torchvision)([=<> ]|$)' "${req}" >"${req%.txt}-image.txt"
-done
-uv pip install build -r requirements/build/cuda-image.txt
-uv pip install -r requirements/cuda-image.txt
+# vLLM's supported way to build against a preinstalled torch: drop the torch
+# pins from requirements and pyproject.toml.
+python tools/use_existing_torch.py
+uv pip install build -r requirements/build/cuda.txt
+uv pip install -r requirements/cuda.txt
 mkdir -p /tmp/wheels
 python -m build --wheel --no-isolation --outdir /tmp/wheels /src/vllm
 uv pip install --no-deps /tmp/wheels/vllm-*.whl
