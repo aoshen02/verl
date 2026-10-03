@@ -84,12 +84,9 @@ ROLLOUT_TP="${ROLLOUT_TP:-1}"
 ROLLOUT_DP="${ROLLOUT_DP:-4}"
 ROLLOUT_EP="${ROLLOUT_EP:-4}"
 
-# --- Megatron Lite NVFP4 actor contract ---
-MLITE_SURROGATE_CONTRACT="${MLITE_SURROGATE_CONTRACT:-moe-fixedscale-grouped-tf32rz-bf16edges-v3}"
-MLITE_ROUTED_VJP_BACKEND="${MLITE_ROUTED_VJP_BACKEND:-compact-f32-tma-nosplit}"
-MLITE_ROUTED_VJP_TOKEN_LIMIT="${MLITE_ROUTED_VJP_TOKEN_LIMIT:-16384}"
+# --- Megatron Lite NVFP4 actor ---
 # Dynamic micro-batches pack whole sequences; without context parallelism one
-# micro-batch must hold the longest sequence and stay within the VJP bound.
+# micro-batch must hold the longest sequence.
 PPO_MAX_TOKEN_LEN_PER_GPU="${PPO_MAX_TOKEN_LEN_PER_GPU:-16384}"
 MLITE_ROUTED_FORWARD_REDUCTION="${MLITE_ROUTED_FORWARD_REDUCTION:-ep4-fi-onesided-fp32-top6-first-rank-v1}"
 
@@ -128,8 +125,6 @@ fi
   die "prompt+response exceeds ROLLOUT_MAX_MODEL_LEN"
 (( MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH <= PPO_MAX_TOKEN_LEN_PER_GPU )) ||
   die "prompt+response exceeds PPO_MAX_TOKEN_LEN_PER_GPU"
-(( PPO_MAX_TOKEN_LEN_PER_GPU <= MLITE_ROUTED_VJP_TOKEN_LIMIT )) ||
-  die "PPO_MAX_TOKEN_LEN_PER_GPU exceeds MLITE_ROUTED_VJP_TOKEN_LIMIT"
 TOTAL_TRAINING_STEPS=null
 if [[ -n "${ACCEPTANCE_STEPS}" ]]; then
   # Capping the run must not rescale the schedule: warmup is in absolute
@@ -264,10 +259,6 @@ ACTOR=(
   +actor_rollout_ref.actor.engine.full_determinism=True
   +actor_rollout_ref.actor.engine.seed="${SEED}"
   +actor_rollout_ref.actor.engine.impl_cfg.optimizer=dist_opt
-  +actor_rollout_ref.actor.engine.impl_cfg.diagnostic_full_training=True
-  +actor_rollout_ref.actor.engine.impl_cfg.surrogate_contract="${MLITE_SURROGATE_CONTRACT}"
-  +actor_rollout_ref.actor.engine.impl_cfg.routed_vjp_backend="${MLITE_ROUTED_VJP_BACKEND}"
-  +actor_rollout_ref.actor.engine.impl_cfg.routed_vjp_token_limit="${MLITE_ROUTED_VJP_TOKEN_LIMIT}"
   +actor_rollout_ref.actor.engine.impl_cfg.routed_forward_reduction="${MLITE_ROUTED_FORWARD_REDUCTION}"
   +actor_rollout_ref.actor.optim.override_optimizer_config.offload_fraction=1.0
   +actor_rollout_ref.actor.optim.override_optimizer_config.use_precision_aware_optimizer=True
