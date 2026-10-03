@@ -130,6 +130,9 @@ ROLLOUT_EP="${ROLLOUT_EP:-4}"
 # Dynamic micro-batches pack whole sequences; without context parallelism one
 # micro-batch must hold the longest sequence.
 PPO_MAX_TOKEN_LEN_PER_GPU="${PPO_MAX_TOKEN_LEN_PER_GPU:-16384}"
+# Optimizer backend: dist_opt (MCore DistributedOptimizer, CPU Adam) or fsdp2
+# (DS4's aligned mode: FP32 shards, Adam on the GPU).
+ACTOR_OPTIMIZER="${ACTOR_OPTIMIZER:-dist_opt}"
 # Activation recompute, as the DeepSeek-V4 aligned recipe (impl_cfg.recompute):
 # with EP4 every rank holds all 52 layers' activations. Bitwise: the
 # recomputed forward reproduces the visible tensors.
@@ -195,6 +198,8 @@ fi
 # --- Validation ---
 [[ "${ACTOR_PP}/${ACTOR_EP}" == 1/4 || "${ACTOR_PP}/${ACTOR_EP}" == 4/1 ]] ||
   die "the NVFP4 actor supports ACTOR_PP/ACTOR_EP 1/4 or 4/1 (got ${ACTOR_PP}/${ACTOR_EP})"
+[[ "${ACTOR_OPTIMIZER}" == dist_opt || "${ACTOR_OPTIMIZER}" == fsdp2 ]] ||
+  die "ACTOR_OPTIMIZER must be dist_opt or fsdp2"
 (( NNODES * NGPUS_PER_NODE == ACTOR_PP * ACTOR_EP )) ||
   die "the NVFP4 actor requires world size == ACTOR_PP * ACTOR_EP"
 (( ROLLOUT_TP * ROLLOUT_DP == NGPUS_PER_NODE )) ||
@@ -363,6 +368,7 @@ ACTOR=(
   +actor_rollout_ref.actor.engine.impl_cfg.bf16_master_path="${BF16_MASTER_PATH}"
   +actor_rollout_ref.actor.engine.impl_cfg.routed_expert_backend="${ROLLOUT_MOE_BACKEND}"
   +actor_rollout_ref.actor.engine.impl_cfg.recompute="${ACTOR_RECOMPUTE}"
+  +actor_rollout_ref.actor.engine.impl_cfg.optimizer="${ACTOR_OPTIMIZER}"
   +actor_rollout_ref.actor.optim.override_optimizer_config.offload_fraction=1.0
   +actor_rollout_ref.actor.optim.override_optimizer_config.use_precision_aware_optimizer=True
   +actor_rollout_ref.actor.optim.override_optimizer_config.decoupled_weight_decay=True
