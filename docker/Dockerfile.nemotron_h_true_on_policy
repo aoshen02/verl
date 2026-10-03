@@ -27,6 +27,10 @@ ARG VERL_REPO=https://github.com/verl-project/verl.git
 ARG VERL_REVISION=0000000000000000000000000000000000000000
 ARG TORCH_VERSION_PREFIX=2.13.
 ARG MAX_JOBS=64
+# Megatron-Core's Mamba kernels; mamba-ssm needs the state_dtype argument
+# (state-spaces/mamba#972), which no release has yet.
+ARG CAUSAL_CONV1D_REVISION=4f6ae4e26ae5fe8af9372f8d312ab25cc4595223
+ARG MAMBA_SSM_REVISION=0048fbf2e7b2f214dcbe703ea3dec2b9647595e1
 
 # -----------------------------------------------------------------------------
 # Builder
@@ -41,6 +45,8 @@ ARG VERL_REPO
 ARG VERL_REVISION
 ARG TORCH_VERSION_PREFIX
 ARG MAX_JOBS
+ARG CAUSAL_CONV1D_REVISION
+ARG MAMBA_SSM_REVISION
 
 ENV VIRTUAL_ENV=/opt/venv \
     PATH=/opt/venv/bin:/usr/local/bin:/usr/local/cuda/bin:/usr/bin:/bin \
@@ -116,6 +122,16 @@ uv pip install --no-build-isolation --no-deps "${lite}"
 uv pip install --no-build-isolation --no-deps "${lite}/examples/verl"
 EOF
 
+# causal-conv1d and mamba-ssm for the Nemotron-H Mamba VJP, built against the
+# base image's torch.
+RUN --mount=type=cache,target=/root/.cache/uv <<'EOF'
+set -eux
+export CAUSAL_CONV1D_FORCE_BUILD=TRUE MAMBA_FORCE_BUILD=TRUE
+uv pip install --no-build-isolation --no-deps \
+  "causal-conv1d @ git+https://github.com/Dao-AILab/causal-conv1d.git@${CAUSAL_CONV1D_REVISION}" \
+  "mamba-ssm @ git+https://github.com/state-spaces/mamba.git@${MAMBA_SSM_REVISION}"
+EOF
+
 # -----------------------------------------------------------------------------
 # verl with its runtime dependencies, never replacing torch or vLLM
 # -----------------------------------------------------------------------------
@@ -143,6 +159,8 @@ import sys
 
 import megatron.lite.model.nemotron_h.protocol  # noqa: F401
 import torch
+from causal_conv1d import causal_conv1d_fn  # noqa: F401
+from mamba_ssm.ops.triton.ssd_combined import mamba_chunk_scan_combined  # noqa: F401
 import verl.trainer.main_ppo  # noqa: F401
 import verl_mlite.engine  # noqa: F401
 import vllm
@@ -153,7 +171,7 @@ if spec is not None and spec.origin:
     assert "verl_mlite" not in pathlib.Path(spec.origin).read_text(), spec.origin
 print(sys.version, torch.__version__, vllm.__version__)
 PY
-for pkg in verl vllm megatron-core; do uv pip show "${pkg}" >/dev/null; done
+for pkg in verl vllm megatron-core causal-conv1d mamba-ssm; do uv pip show "${pkg}" >/dev/null; done
 printf '{"schema":"nemotron-h-true-on-policy-image/v1","vllm_revision":"%s","megatron_revision":"%s","verl_revision":"%s","vllm_wheel_sha256":"%s"}\n' \
   "${VLLM_REVISION}" "${MEGATRON_REVISION}" "${VERL_REVISION}" \
   "$(cat /opt/nemotron/vllm-wheel.sha256)" >/opt/nemotron/image-manifest.json
