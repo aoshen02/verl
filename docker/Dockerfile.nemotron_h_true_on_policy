@@ -166,9 +166,9 @@ EOF
 COPY . /src/verl
 RUN --mount=type=cache,target=/root/.cache/uv <<'EOF'
 set -eux
-cd /src/verl
-test -z "$(git status --porcelain --untracked-files=all)"
-git rev-parse HEAD >/opt/nemotron/verl-revision
+# Not run from /src/verl: uv would apply verl's own [tool.uv] overrides.
+test -z "$(git -C /src/verl status --porcelain --untracked-files=all)"
+git -C /src/verl rev-parse HEAD >/opt/nemotron/verl-revision
 uv pip freeze | grep -iE '^(torch|torchvision|torchaudio|vllm|flashinfer-python|transformers|megatron-core)==' \
   >/tmp/constraints.txt
 # Keep vLLM's exact transformers build instead of re-resolving it for verl.
@@ -178,8 +178,9 @@ grep -i '^transformers==' /tmp/constraints.txt | cat - /tmp/base-image-packages.
 uv pip install -c /tmp/constraints.txt --override /tmp/overrides.txt "/src/verl[verl-core]" \
   hydra-core==1.4.0.dev8
 install -d /opt/nemotron/recipe
-cp examples/grpo_trainer/run_nemotron_h_lightning_nvfp4_true_on_policy_megatron.sh /opt/nemotron/recipe/
-cp -r examples/grpo_trainer/nemotron_h_true_on_policy /opt/nemotron/recipe/
+cp /src/verl/examples/grpo_trainer/run_nemotron_h_lightning_nvfp4_true_on_policy_megatron.sh \
+  /opt/nemotron/recipe/
+cp -r /src/verl/examples/grpo_trainer/nemotron_h_true_on_policy /opt/nemotron/recipe/
 EOF
 
 # -----------------------------------------------------------------------------
