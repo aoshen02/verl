@@ -44,6 +44,12 @@ ARG MAX_JOBS=64
 # (state-spaces/mamba#972), which no release has yet.
 ARG CAUSAL_CONV1D_REVISION=4f6ae4e26ae5fe8af9372f8d312ab25cc4595223
 ARG MAMBA_SSM_REVISION=0048fbf2e7b2f214dcbe703ea3dec2b9647595e1
+# The actor's EP4 token dispatch: the DeepSeek-V4 aligned fork of DeepEP, built
+# for one node of four NVLink peers as the DS4 recipe builds it.
+ARG DEEPEP_REPO=https://github.com/ISEEKYAN/DeepEP.git
+ARG DEEPEP_REVISION=2cd85412155cbc07452f552ac6e2f446a26f8869
+ARG DEEPEP_VERSION=1.2.1+2cd8541
+ARG NVSHMEM_VERSION=3.4.5
 
 # -----------------------------------------------------------------------------
 # Builder
@@ -60,6 +66,10 @@ ARG TORCH_VERSION_PREFIX
 ARG MAX_JOBS
 ARG CAUSAL_CONV1D_REVISION
 ARG MAMBA_SSM_REVISION
+ARG DEEPEP_REPO
+ARG DEEPEP_REVISION
+ARG DEEPEP_VERSION
+ARG NVSHMEM_VERSION
 
 ENV VIRTUAL_ENV=/opt/venv \
     PATH=/opt/venv/bin:/usr/local/bin:/usr/local/cuda/bin:/usr/bin:/bin \
@@ -159,6 +169,26 @@ uv pip install --no-build-isolation --no-deps \
   "mamba-ssm @ git+https://github.com/state-spaces/mamba.git@${MAMBA_SSM_REVISION}"
 EOF
 
+# DeepEP (normal intranode mode) for the actor's EP4 dispatch, against the base
+# image's torch. Without NVSHMEM its build compiles relocatable device code
+# without the device link and the module does not load, so NVSHMEM comes first
+# (the version the DeepSeek-V4 image carries).
+RUN --mount=type=cache,target=/root/.cache/uv <<'EOF'
+set -eux
+. /tmp/arch.env
+uv pip install --no-deps "nvidia-nvshmem-cu13==${NVSHMEM_VERSION}"
+git init /src/DeepEP
+git -C /src/DeepEP remote add origin "${DEEPEP_REPO}"
+git -C /src/DeepEP fetch --depth 1 origin "${DEEPEP_REVISION}"
+git -C /src/DeepEP checkout --detach "${DEEPEP_REVISION}"
+test "$(git -C /src/DeepEP rev-parse HEAD)" = "${DEEPEP_REVISION}"
+mkdir -p /tmp/wheels/deepep
+(cd /src/DeepEP && DEEPEP_NUM_MAX_NVL_PEERS=4 CPATH=/usr/local/cuda/include/cccl \
+  python -m pip wheel --no-deps --no-build-isolation -w /tmp/wheels/deepep .)
+uv pip install --no-deps /tmp/wheels/deepep/deep_ep-*.whl
+test "$(uv pip show deep-ep | sed -n 's/^Version: //p')" = "${DEEPEP_VERSION}"
+EOF
+
 # -----------------------------------------------------------------------------
 # verl from this checkout with its runtime dependencies, never replacing torch
 # or vLLM, and the recipe
@@ -188,10 +218,11 @@ EOF
 # -----------------------------------------------------------------------------
 RUN <<'EOF'
 set -eux
-for pkg in verl vllm megatron-core causal-conv1d mamba-ssm; do uv pip show "${pkg}" >/dev/null; done
-printf '{"schema":"nemotron-h-true-on-policy-image/v2","base_image_digest":"%s","vllm_revision":"%s","vllm_version":"%s","megatron_revision":"%s","verl_revision":"%s","causal_conv1d_revision":"%s","mamba_ssm_revision":"%s","vllm_wheel_sha256":"%s"}\n' \
+for pkg in verl vllm megatron-core causal-conv1d mamba-ssm deep-ep nvidia-nvshmem-cu13; do uv pip show "${pkg}" >/dev/null; done
+printf '{"schema":"nemotron-h-true-on-policy-image/v3","base_image_digest":"%s","vllm_revision":"%s","vllm_version":"%s","megatron_revision":"%s","verl_revision":"%s","causal_conv1d_revision":"%s","mamba_ssm_revision":"%s","deepep_revision":"%s","nvshmem_version":"%s","vllm_wheel_sha256":"%s"}\n' \
   "${BASE_IMAGE_DIGEST}" "${VLLM_REVISION}" "${VLLM_VERSION}" "${MEGATRON_REVISION}" \
   "$(cat /opt/nemotron/verl-revision)" "${CAUSAL_CONV1D_REVISION}" "${MAMBA_SSM_REVISION}" \
+  "${DEEPEP_REVISION}" "${NVSHMEM_VERSION}" \
   "$(cat /opt/nemotron/vllm-wheel.sha256)" >/opt/nemotron/image-manifest.json
 uv pip freeze >/opt/nemotron/pip-freeze.txt
 rm -rf /src /tmp/wheels /tmp/arch.env /tmp/constraints.txt /root/.cache
@@ -240,6 +271,7 @@ import torch
 import triton
 from causal_conv1d import causal_conv1d_fn  # noqa: F401
 from mamba_ssm.ops.triton.ssd_combined import mamba_chunk_scan_combined  # noqa: F401
+import deep_ep  # noqa: F401
 import verl.trainer.main_ppo  # noqa: F401
 import verl_mlite.engine  # noqa: F401
 import vllm

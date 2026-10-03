@@ -15,9 +15,10 @@
 # (verl_mlite.compat._patch_bucketed_weight_sender).
 #
 # Topology (GB200, 4 GPUs/node; colocated hybrid engine on one node):
-#   actor:   Megatron Lite PP4, TP1/EP1/CP1, dense DP1, dist_opt
+#   actor:   Megatron Lite EP4 over DeepEP, PP1/TP1/CP1, dense DP4, dist_opt
 #   rollout: vLLM TP1 DP4 EP4, FlashInfer CuTe-DSL W4A16 MoE, FlashInfer one-sided all2all
-# The Megatron Lite NVFP4 actor requires world size == PP == 4.
+# The actor's routed experts follow the rollout's EP4 placement; the
+# previous layout (ACTOR_PP=4 ACTOR_EP=1) is still accepted.
 # Containers need the IMEX channel (/dev/nvidia-caps-imex-channels) for the
 # FlashInfer one-sided all2all.
 #
@@ -119,7 +120,8 @@ ACCEPTANCE_STEPS="${ACCEPTANCE_STEPS:-}"
 # --- Topology ---
 NNODES="${NNODES:-1}"
 NGPUS_PER_NODE="${NGPUS_PER_NODE:-4}"
-ACTOR_PP="${ACTOR_PP:-4}"
+ACTOR_PP="${ACTOR_PP:-1}"
+ACTOR_EP="${ACTOR_EP:-4}"
 ROLLOUT_TP="${ROLLOUT_TP:-1}"
 ROLLOUT_DP="${ROLLOUT_DP:-4}"
 ROLLOUT_EP="${ROLLOUT_EP:-4}"
@@ -178,8 +180,10 @@ if [[ -z "${TRAINER_LOGGERS:-}" ]]; then
 fi
 
 # --- Validation ---
-(( NNODES * NGPUS_PER_NODE == ACTOR_PP )) ||
-  die "the NVFP4 actor requires world size == ACTOR_PP (got $((NNODES * NGPUS_PER_NODE)) vs ${ACTOR_PP})"
+[[ "${ACTOR_PP}/${ACTOR_EP}" == 1/4 || "${ACTOR_PP}/${ACTOR_EP}" == 4/1 ]] ||
+  die "the NVFP4 actor supports ACTOR_PP/ACTOR_EP 1/4 or 4/1 (got ${ACTOR_PP}/${ACTOR_EP})"
+(( NNODES * NGPUS_PER_NODE == ACTOR_PP * ACTOR_EP )) ||
+  die "the NVFP4 actor requires world size == ACTOR_PP * ACTOR_EP"
 (( ROLLOUT_TP * ROLLOUT_DP == NGPUS_PER_NODE )) ||
   die "rollout TP*DP must equal NGPUS_PER_NODE"
 (( MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH <= ROLLOUT_MAX_MODEL_LEN )) ||
@@ -329,7 +333,7 @@ ACTOR=(
   actor_rollout_ref.actor.engine.grad_offload=True
   actor_rollout_ref.actor.engine.tp=1
   actor_rollout_ref.actor.engine.etp=1
-  actor_rollout_ref.actor.engine.ep=1
+  actor_rollout_ref.actor.engine.ep="${ACTOR_EP}"
   actor_rollout_ref.actor.engine.cp=1
   actor_rollout_ref.actor.engine.vpp=1
   actor_rollout_ref.actor.engine.pp="${ACTOR_PP}"
@@ -422,8 +426,8 @@ COMMAND=(
   "$@"
 )
 
-printf 'MODEL_REVISION=%s BF16_MASTER_REVISION=%s TOPOLOGY=%sx%s ACTOR_PP=%s ROLLOUT=TP%s/DP%s/EP%s STEPS=%s\n' \
-  "${MODEL_REVISION}" "${BF16_MASTER_REVISION}" "${NNODES}" "${NGPUS_PER_NODE}" "${ACTOR_PP}" \
+printf 'MODEL_REVISION=%s BF16_MASTER_REVISION=%s TOPOLOGY=%sx%s ACTOR=PP%s/EP%s ROLLOUT=TP%s/DP%s/EP%s STEPS=%s\n' \
+  "${MODEL_REVISION}" "${BF16_MASTER_REVISION}" "${NNODES}" "${NGPUS_PER_NODE}" "${ACTOR_PP}" "${ACTOR_EP}" \
   "${ROLLOUT_TP}" "${ROLLOUT_DP}" "${ROLLOUT_EP}" "${TOTAL_TRAINING_STEPS}"
 
 if [[ "${DRY_RUN:-0}" == 1 ]]; then
