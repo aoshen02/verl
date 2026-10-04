@@ -8,8 +8,7 @@ ARG BASE_IMAGE_DIGEST=sha256:2140e699b3beaf7f96a0081fd9c9406bc3832b435cdb60dfa2d
 ARG TARGETARCH=arm64
 
 # vLLM, Megatron-LM (megatron.lite, verl_mlite) and VERL (this build context)
-# are all installed in the image; the DeepSeek-V4 preview mounts VERL and
-# Megatron-LM at run time instead.
+# are installed in the image.
 ARG VLLM_REPO=https://github.com/aoshen02/vllm.git
 ARG VLLM_REF=refs/heads/pr/nemotron-h-bi-cutedsl-p6
 ARG VLLM_REVISION=cb4dfec6400ede8823d93c5b22fe983ca2396da0
@@ -22,7 +21,7 @@ ARG VLLM_BASE_TAG=v0.30.1rc0
 ARG MEGATRON_REPO=https://github.com/aoshen02/Megatron-LM.git
 ARG MEGATRON_REVISION=d33cb72f01cc8b46dd89e14a36200edb5d82e1d1
 # Megatron-Core's Mamba kernels; mamba-ssm needs the state_dtype argument
-# (state-spaces/mamba#972), which no release has yet.
+# (state-spaces/mamba#972).
 ARG CAUSAL_CONV1D_REVISION=4f6ae4e26ae5fe8af9372f8d312ab25cc4595223
 ARG MAMBA_SSM_REVISION=0048fbf2e7b2f214dcbe703ea3dec2b9647595e1
 ARG DEEPEP_REPO=https://github.com/ISEEKYAN/DeepEP.git
@@ -159,7 +158,7 @@ git -C /src/verl rev-parse HEAD >/opt/nemotron/verl-revision
 uv pip freeze | grep -iE '^(torch|torchvision|torchaudio|vllm|flashinfer-python|transformers|megatron-core)==' \
   >/tmp/constraints.txt
 grep -i '^transformers==' /tmp/constraints.txt | cat - /tmp/base-image-packages.txt >/tmp/overrides.txt
-# The Megatron Lite verl config needs omegaconf 2.4 (hydra-core 1.4), as DS4.
+# The Megatron Lite verl config needs omegaconf 2.4 (hydra-core 1.4).
 uv pip install -c /tmp/constraints.txt --override /tmp/overrides.txt "/src/verl[verl-core]" \
   hydra-core==1.4.0.dev8
 install -D -m 0755 \

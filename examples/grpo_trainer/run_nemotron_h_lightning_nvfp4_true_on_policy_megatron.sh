@@ -3,8 +3,8 @@
 # aligned/quick_alignment_test use batch-invariant vLLM for exact probabilities.
 # Modes: quick_alignment_test (1x4, short workload, three steps), aligned.
 # Hardware: gb200 (1x4, PP1/EP4 actor, rollout DP4/EP4).
-# Image builds on `Dockerfile.nemotron_h_true_on_policy`. Unlike the DeepSeek-V4
-# preview, vLLM, Megatron-LM and VERL are installed in the image; nothing is mounted.
+# Image builds on `Dockerfile.nemotron_h_true_on_policy`, which installs vLLM,
+# Megatron-LM and VERL; nothing is mounted.
 set -euo pipefail
 
 # Required env: MODEL_PATH, BF16_MASTER_PATH, TRAIN_FILES, VAL_FILES.
@@ -148,7 +148,7 @@ OPTIMIZER_ARGS=(
 # The ModelOpt checkpoint refits through vLLM's layerwise reload.
 VLLM_WORKER_EXTENSION="verl_mlite.rollout.vllm_worker.MLiteVLLMColocateWorkerExtension"
 
-# --- Validated hardware profile ---
+# --- Hardware profile ---
 : "${NNODES:=1}"
 : "${NGPUS_PER_NODE:=4}"
 : "${ACTOR_PP:=1}"
