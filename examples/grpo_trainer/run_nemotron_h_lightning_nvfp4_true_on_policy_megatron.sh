@@ -65,7 +65,6 @@ done
 : "${BF16_MASTER_PATH:?set BF16_MASTER_PATH to the Nemotron-H Lightning BF16 release}"
 : "${TRAIN_FILES:?set TRAIN_FILES to DAPO-format training parquet}"
 : "${VAL_FILES:?set VAL_FILES to DAPO-format validation parquet}"
-[[ -s "${MODEL_PATH}/config.json" ]] || die "missing ${MODEL_PATH}/config.json"
 
 # --- Mode presets ---
 # quick_alignment_test keeps the full model (the actor requires the complete
@@ -100,13 +99,12 @@ case "${MODE}" in
     die "unknown mode '${MODE}'"
     ;;
 esac
-# The FSDP2 actor keeps its FP32 shards on the GPU during rollout; at 0.7 vLLM's
-# FlashInfer autotune warmup runs out of memory.
-: "${ROLLOUT_GPU_MEMORY_UTILIZATION:=0.65}"
-
 : "${ACTOR_OPTIMIZER:=fsdp2}"
 case "${ACTOR_OPTIMIZER}" in
-  dist_opt|fsdp2) ;;
+  # The FSDP2 actor keeps its FP32 shards on the GPU during rollout; at 0.7
+  # vLLM's FlashInfer autotune warmup runs out of memory.
+  fsdp2) : "${ROLLOUT_GPU_MEMORY_UTILIZATION:=0.65}" ;;
+  dist_opt) : "${ROLLOUT_GPU_MEMORY_UTILIZATION:=0.7}" ;;
   *) die "ACTOR_OPTIMIZER must be dist_opt or fsdp2, got '${ACTOR_OPTIMIZER}'" ;;
 esac
 
@@ -179,8 +177,6 @@ ACTOR_ARGS=(
   actor_rollout_ref.actor.engine.pp="${ACTOR_PP}"
   actor_rollout_ref.actor.engine.cp="${ACTOR_CP}"
   actor_rollout_ref.actor.engine.ep="${ACTOR_EP}"
-  '~actor_rollout_ref.actor.engine.grad_offload'
-  '~actor_rollout_ref.ref.engine.grad_offload'
   # The actor exports its NVFP4/FP8 deployment bytes as stored.
   actor_rollout_ref.actor.engine.export_dtype=null
   +actor_rollout_ref.actor.engine.impl_cfg.bf16_master_path="${BF16_MASTER_PATH}"
@@ -231,7 +227,8 @@ for name in WANDB_ENTITY WANDB_MODE WANDB_BASE_URL HF_HUB_OFFLINE NCCL_MNNVL_ENA
   fi
 done
 
-if [[ "${DRY_RUN:-0}" != 1 ]]; then
+if [[ "${DRY_RUN:-0}" != 1 && "${COMPOSE_ONLY:-0}" != 1 ]]; then
+  [[ -s "${MODEL_PATH}/config.json" ]] || die "missing ${MODEL_PATH}/config.json"
   [[ -s "${BF16_MASTER_PATH}/config.json" ]] || die "missing ${BF16_MASTER_PATH}/config.json"
   IFS=, read -r -a train_files <<<"${TRAIN_FILES}"
   IFS=, read -r -a val_files <<<"${VAL_FILES}"
