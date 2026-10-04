@@ -223,8 +223,7 @@ for name in "${RAY_ENV_NAMES[@]}"; do
   )
 done
 
-for name in WANDB_ENTITY WANDB_MODE WANDB_BASE_URL HF_HUB_OFFLINE \
-  NCCL_MNNVL_ENABLE NCCL_CUMEM_ENABLE; do
+for name in WANDB_ENTITY WANDB_MODE WANDB_BASE_URL HF_HUB_OFFLINE NCCL_MNNVL_ENABLE; do
   if [[ -v "${name}" ]]; then
     RAY_RUNTIME_ENV+=(
       "+ray_kwargs.ray_init.runtime_env.env_vars.${name}=\"${!name}\""
