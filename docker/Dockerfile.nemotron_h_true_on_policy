@@ -12,15 +12,15 @@ ARG TARGETARCH=arm64
 # Megatron-LM at run time instead.
 ARG VLLM_REPO=https://github.com/aoshen02/vllm.git
 ARG VLLM_REF=refs/heads/pr/nemotron-h-bi-cutedsl-p6
-ARG VLLM_REVISION=e54cf7bbbcbdedcc04da9c08a4262aa9a393ea34
-ARG VLLM_TREE=aa106d6074d3e43b5896e7cb53299c0476f29805
+ARG VLLM_REVISION=121951c5d466755d279b5d96af87bd893422a503
+ARG VLLM_TREE=03806a02b72ec58f5d8d8d567330bca8da6c8ac8
 # What setuptools-scm derives for VLLM_REVISION from upstream's release tag.
-ARG VLLM_VERSION=0.30.1rc1.dev623+ge54cf7bbb
+ARG VLLM_VERSION=0.30.1rc1.dev625+g121951c5d
 ARG VLLM_TAG_REPO=https://github.com/vllm-project/vllm.git
 ARG VLLM_BASE_TAG=v0.30.1rc0
 
 ARG MEGATRON_REPO=https://github.com/aoshen02/Megatron-LM.git
-ARG MEGATRON_REVISION=e2773ab0d80e7147279d9b3e28205bfe004ae2f3
+ARG MEGATRON_REVISION=7e3f7c2400b35a22d1eb3b35d1b3f87fa1b3a11f
 # Megatron-Core's Mamba kernels; mamba-ssm needs the state_dtype argument
 # (state-spaces/mamba#972), which no release has yet.
 ARG CAUSAL_CONV1D_REVISION=4f6ae4e26ae5fe8af9372f8d312ab25cc4595223
