@@ -15,7 +15,9 @@
 # (verl_mlite.compat._patch_bucketed_weight_sender).
 #
 # Topology (GB200, 4 GPUs/node; colocated hybrid engine on one node):
-#   actor:   Megatron Lite EP4 over DeepEP, PP1/TP1/CP1, dense DP4, dist_opt
+#   actor:   Megatron Lite EP4 over DeepEP, PP1/TP1/CP1, dense DP4; optimizer
+#            ACTOR_OPTIMIZER=dist_opt (script default) or fsdp2 (the EP4
+#            delivery configuration, DS4-aligned; see ACTOR_OPTIMIZER below)
 #   rollout: vLLM TP1 DP4 EP4, FlashInfer CuTe-DSL W4A16 MoE, FlashInfer one-sided all2all
 # The actor's routed experts follow the rollout's EP4 placement; the
 # previous layout (ACTOR_PP=4 ACTOR_EP=1) is still accepted.
@@ -39,15 +41,19 @@
 #   advantages vanish. Bitwise rollout/training agreement comes from
 #   VLLM_BATCH_INVARIANT=1 (set below), not from the VERL_FULL_DETERMINISM,
 #   CUBLAS_WORKSPACE_CONFIG and NCCL_ALGO settings that True would add.
-# - PP4/TP1/EP1/CP1 actor with dist_opt and a 16384-token micro-batch budget:
-#   the NVFP4 actor needs world size == PP; without CP one micro-batch holds
-#   the longest sequence.
-# - Humming W4A16 MoE (indexed GEMM) and FlashInfer one-sided all2all instead
-#   of DeepGEMM/DeepEP; FP8 KV cache, raw logprobs and no prefix caching are
-#   the serving contract the actor replays.
-# - Rollout batched tokens 16384 and memory fraction 0.7; no full recompute or
-#   cross-entropy fusion; use_fused_kernels=False and trust_remote_code=False
-#   (Nemotron-H is native in transformers).
+# - EP4/PP1/TP1/CP1 actor (world size == ACTOR_PP * ACTOR_EP) with a
+#   16384-token micro-batch budget: without CP one micro-batch holds the
+#   longest sequence. With ACTOR_OPTIMIZER=fsdp2 the optimizer is DS4's
+#   aligned FSDP2 (FP32 shards, AdamW on the GPU); dist_opt keeps MCore's
+#   DistributedOptimizer with CPU Adam.
+# - FlashInfer CuTe-DSL W4A16 MoE and FlashInfer one-sided all2all in the
+#   rollout instead of DeepGEMM/DeepEP (the actor's EP4 dispatch is DeepEP
+#   normal mode); FP8 KV cache, raw logprobs and no prefix caching are the
+#   serving contract the actor replays.
+# - Rollout batched tokens 16384; memory fraction 0.65 with the FSDP2 actor,
+#   0.7 with dist_opt (see ROLLOUT_GPU_MEMORY_UTILIZATION); full activation
+#   recompute with EP4, no cross-entropy fusion; use_fused_kernels=False and
+#   trust_remote_code=False (Nemotron-H is native in transformers).
 # Settings that equal current defaults (clipping, KL, entropy, epochs, LR
 # schedule, parallel sizes) are spelled out to pin the contract.
 set -euo pipefail
@@ -131,7 +137,10 @@ ROLLOUT_EP="${ROLLOUT_EP:-4}"
 # micro-batch must hold the longest sequence.
 PPO_MAX_TOKEN_LEN_PER_GPU="${PPO_MAX_TOKEN_LEN_PER_GPU:-16384}"
 # Optimizer backend: dist_opt (MCore DistributedOptimizer, CPU Adam) or fsdp2
-# (DS4's aligned mode: FP32 shards, Adam on the GPU).
+# (DS4's aligned mode: FP32 shards, Adam on the GPU). The EP4 delivery
+# configuration is fsdp2: about half of dist_opt's update time and about
+# half its host memory (444 vs 757 GiB node peak, GB200 fast profile). The
+# script default is still dist_opt; set ACTOR_OPTIMIZER=fsdp2.
 ACTOR_OPTIMIZER="${ACTOR_OPTIMIZER:-dist_opt}"
 # Activation recompute, as the DeepSeek-V4 aligned recipe (impl_cfg.recompute):
 # with EP4 every rank holds all 52 layers' activations. Bitwise: the
@@ -143,7 +152,8 @@ else
 fi
 # Host RAM the run adds on a 4-GPU node, measured on GB200 (full model, BF16
 # masters, CPU-offloaded optimizer) at the end of the first update: 738 GiB
-# with PP4, 765 GiB with EP4 (dense parameters replicated on four ranks).
+# with PP4, 765 GiB with EP4 dist_opt (dense parameters replicated on four
+# ranks). EP4 fsdp2 peaks at about 440 GiB; the same minimum applies.
 # 0 disables the check.
 if [[ "${ACTOR_EP}" == 4 ]]; then
   HOST_MEM_MIN_GIB="${HOST_MEM_MIN_GIB:-780}"
@@ -161,8 +171,10 @@ ROLLOUT_KV_CACHE_DTYPE="${ROLLOUT_KV_CACHE_DTYPE:-fp8_e4m3}"
 ROLLOUT_MAX_MODEL_LEN="${ROLLOUT_MAX_MODEL_LEN:-$((MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH))}"
 ROLLOUT_MAX_NUM_SEQS="${ROLLOUT_MAX_NUM_SEQS:-128}"
 ROLLOUT_MAX_NUM_BATCHED_TOKENS="${ROLLOUT_MAX_NUM_BATCHED_TOKENS:-16384}"
-# The FSDP2 actor keeps its parameters and shards on the GPU during rollout
-# (45 GiB per GPU with EP4); at 0.7 vLLM's warmup runs out of memory.
+# The FSDP2 actor keeps its FP32 parameter shards on the GPU during rollout
+# (about 45 GiB per GPU with EP4); at 0.7 vLLM's FlashInfer autotune warmup
+# runs out of memory allocating the FA4 split buffer (8 GiB), so fsdp2
+# defaults to 0.65. dist_opt keeps its masters on the host and stays at 0.7.
 if [[ "${ACTOR_OPTIMIZER}" == fsdp2 ]]; then
   ROLLOUT_GPU_MEMORY_UTILIZATION="${ROLLOUT_GPU_MEMORY_UTILIZATION:-0.65}"
 else
