@@ -20,7 +20,7 @@ ARG VLLM_TAG_REPO=https://github.com/vllm-project/vllm.git
 ARG VLLM_BASE_TAG=v0.30.1rc0
 
 ARG MEGATRON_REPO=https://github.com/aoshen02/Megatron-LM.git
-ARG MEGATRON_REVISION=7c331603bd80941e9220b9b43c9271a42e799cc0
+ARG MEGATRON_REVISION=e2773ab0d80e7147279d9b3e28205bfe004ae2f3
 # Megatron-Core's Mamba kernels; mamba-ssm needs the state_dtype argument
 # (state-spaces/mamba#972), which no release has yet.
 ARG CAUSAL_CONV1D_REVISION=4f6ae4e26ae5fe8af9372f8d312ab25cc4595223
