@@ -1,3 +1,0 @@
-# @package _global_
-# Selects mlite_actor/mlite_ref from pkg://verl_mlite.config.
-model_engine: mlite

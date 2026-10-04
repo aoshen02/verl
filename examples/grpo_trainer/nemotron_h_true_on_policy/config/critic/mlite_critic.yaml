@@ -1,6 +1,0 @@
-# model_engine=mlite needs a critic entry; the recipe runs without a critic.
-_target_: verl.workers.config.CriticConfig
-
-enable: false
-
-strategy: mlite
