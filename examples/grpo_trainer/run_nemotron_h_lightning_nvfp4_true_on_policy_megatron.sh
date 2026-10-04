@@ -101,10 +101,10 @@ case "${MODE}" in
 esac
 : "${ACTOR_OPTIMIZER:=fsdp2}"
 case "${ACTOR_OPTIMIZER}" in
-  # The FSDP2 actor keeps its FP32 shards on the GPU during rollout; at 0.7
-  # vLLM's FlashInfer autotune warmup runs out of memory.
+  # The actor's training state stays on the GPU during rollout; larger values
+  # run out of memory in vLLM's startup or FlashInfer autotune warmup.
   fsdp2) : "${ROLLOUT_GPU_MEMORY_UTILIZATION:=0.65}" ;;
-  dist_opt) : "${ROLLOUT_GPU_MEMORY_UTILIZATION:=0.7}" ;;
+  dist_opt) : "${ROLLOUT_GPU_MEMORY_UTILIZATION:=0.55}" ;;
   *) die "ACTOR_OPTIMIZER must be dist_opt or fsdp2, got '${ACTOR_OPTIMIZER}'" ;;
 esac
 
