@@ -205,14 +205,12 @@ export PYTHONUNBUFFERED=1
 export PYTHONHASHSEED="${SEED}"
 # Cold starts (no compile caches) take longer than vLLM's 600 s default.
 export VLLM_ENGINE_READY_TIMEOUT_S="${VLLM_ENGINE_READY_TIMEOUT_S:-2400}"
-# DS4 forwards this only when set; we default it: direct DCP writes to Lustre fail.
-export MLITE_DCP_LOCAL_STAGE_DIR="${MLITE_DCP_LOCAL_STAGE_DIR:-/tmp/mlite-dcp-stage}"
 
 # Exporting in this launcher is not enough for an existing Ray cluster.
 RAY_ENV_NAMES=(
   PYTHONNOUSERSITE PYTHONHASHSEED
   VLLM_BATCH_INVARIANT VLLM_USE_V2_MODEL_RUNNER VLLM_ENGINE_READY_TIMEOUT_S
-  VERL_FILE_LOGGER_PATH MLITE_DCP_LOCAL_STAGE_DIR
+  VERL_FILE_LOGGER_PATH
 )
 RAY_RUNTIME_ENV=()
 for name in "${RAY_ENV_NAMES[@]}"; do
@@ -221,7 +219,8 @@ for name in "${RAY_ENV_NAMES[@]}"; do
   )
 done
 
-for name in WANDB_ENTITY WANDB_MODE WANDB_BASE_URL HF_HUB_OFFLINE NCCL_MNNVL_ENABLE; do
+# Cluster launchers should point MLITE_DCP_LOCAL_STAGE_DIR at node-local disk.
+for name in WANDB_ENTITY WANDB_MODE WANDB_BASE_URL HF_HUB_OFFLINE NCCL_MNNVL_ENABLE MLITE_DCP_LOCAL_STAGE_DIR; do
   if [[ -v "${name}" ]]; then
     RAY_RUNTIME_ENV+=(
       "+ray_kwargs.ray_init.runtime_env.env_vars.${name}=\"${!name}\""
