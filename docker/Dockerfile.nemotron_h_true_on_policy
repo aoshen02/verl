@@ -12,17 +12,12 @@
 # the DeepSeek-V4 Megatron Lite recipe: importing verl_mlite.engine replaces
 # verl's bucketed weight sender (verl_mlite.compat._patch_bucketed_weight_sender).
 #
-# The pinned vLLM and Megatron-LM commits are not published yet, so builds pass
-# a mirror that has them; the pins, not the URLs, identify the sources. The
-# release candidate was built on GB200 (arm64) from a clean verl clone, with a
-# loopback git daemon serving the mirrors and a BuildKit daemon that allows
-# network.host (to reach that git daemon):
+# The pinned vLLM and Megatron-LM commits are published on the aoshen02 forks
+# (branches pr/nemotron-h-bi-cutedsl-p6 and pr/nemotron-h-ep4-cutedsl); the
+# pins, not the URLs, identify the sources. Build on GB200 (arm64) from a clean checkout of this commit:
 #
-#   docker buildx build --builder opus-pkg --allow network.host --network host \
-#     --platform linux/arm64 -f docker/Dockerfile.nemotron_h_true_on_policy \
-#     --build-arg VLLM_REPO=git://127.0.0.1:9419/vllm.git \
-#     --build-arg MEGATRON_REPO=git://127.0.0.1:9419/megatron.git \
-#     --output type=docker,dest=nemotron-h-true-on-policy.tar \
+#   docker buildx build --platform linux/arm64 \
+#     -f docker/Dockerfile.nemotron_h_true_on_policy \
 #     -t verl:nemotron-h-true-on-policy .
 
 # -----------------------------------------------------------------------------
@@ -32,12 +27,15 @@ ARG BASE_IMAGE=nvcr.io/nvidia/pytorch:26.07-py3
 ARG BASE_IMAGE_DIGEST=sha256:2140e699b3beaf7f96a0081fd9c9406bc3832b435cdb60dfa2d261f7d2f34a1c
 ARG TARGETARCH=arm64
 
-ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
+ARG VLLM_REPO=https://github.com/aoshen02/vllm.git
 ARG VLLM_REVISION=a92e2ac3c4c51f2b75c147f228c5928b749973c2
-# What setuptools-scm derives for VLLM_REVISION (v0.30.1rc0-618).
+# What setuptools-scm derives for VLLM_REVISION (v0.30.1rc0-618). The release
+# tag it counts from is fetched from upstream vLLM.
 ARG VLLM_VERSION=0.30.1rc1.dev618+ga92e2ac3c
-ARG MEGATRON_REPO=https://github.com/NVIDIA/Megatron-LM.git
-ARG MEGATRON_REVISION=f88ca3cc8d981ca3760dd4e82becdfe552dd6ead
+ARG VLLM_TAG_REPO=https://github.com/vllm-project/vllm.git
+ARG VLLM_BASE_TAG=v0.30.1rc0
+ARG MEGATRON_REPO=https://github.com/aoshen02/Megatron-LM.git
+ARG MEGATRON_REVISION=2fef8305976162cf086fc25e9ce85a43bdf730dc
 ARG TORCH_VERSION_PREFIX=2.13.
 ARG MAX_JOBS=64
 # Megatron-Core's Mamba kernels; mamba-ssm needs the state_dtype argument
@@ -60,6 +58,8 @@ ARG BASE_IMAGE_DIGEST
 ARG VLLM_REPO
 ARG VLLM_REVISION
 ARG VLLM_VERSION
+ARG VLLM_TAG_REPO
+ARG VLLM_BASE_TAG
 ARG MEGATRON_REPO
 ARG MEGATRON_REVISION
 ARG TORCH_VERSION_PREFIX
@@ -106,9 +106,11 @@ clone_exact() {
   git -C "/src/$1" checkout --detach "$3"
   test "$(git -C "/src/$1" rev-parse HEAD)" = "$3"
 }
-# vLLM keeps its history and release tags so that its version can be derived.
+# vLLM keeps its history and its base release tag so that its version can be
+# derived.
 clone_exact vllm "${VLLM_REPO}" "${VLLM_REVISION}"
-git -C /src/vllm fetch --no-tags origin 'refs/tags/v*:refs/tags/v*'
+git -C /src/vllm fetch --no-tags "${VLLM_TAG_REPO}" "refs/tags/${VLLM_BASE_TAG}:refs/tags/${VLLM_BASE_TAG}"
+git -C /src/vllm merge-base --is-ancestor "${VLLM_BASE_TAG}" HEAD
 clone_exact Megatron-LM "${MEGATRON_REPO}" "${MEGATRON_REVISION}" 1
 
 python3 -c "import torch, sys; sys.exit(not torch.__version__.startswith('${TORCH_VERSION_PREFIX}'))"
