@@ -2,13 +2,14 @@
 # Nemotron-H Lightning NVFP4 true-on-policy for VERL.
 # VLLM_BATCH_INVARIANT=1 (default): batch-invariant vLLM rollout and a Megatron
 # Lite actor on the same vLLM kernels, for exact probabilities.
-# VLLM_BATCH_INVARIANT=0: the conventional baseline: default vLLM kernels, a
-# Megatron-Bridge actor on BF16 masters (QAT by default) and rollout routing
-# replay (R3); weights are requantized into the checkpoint's format at every sync.
+# VLLM_BATCH_INVARIANT=0: the conventional baseline, not true on-policy: vLLM's
+# default kernels with prefix caching, the verl Megatron engine (Megatron-Bridge/
+# mcore) on the BF16 release (weight QAT by default) and rollout routing replay
+# (R3); every sync requantizes the weights into the checkpoint's ModelOpt format.
 # Modes: quick_alignment_test (1x4, short workload, three steps), aligned.
 # Hardware: gb200 (1x4, PP1/EP4 actor, rollout DP4/EP4).
 # Image builds on `Dockerfile.nemotron_h_true_on_policy`, which installs vLLM,
-# Megatron-LM and VERL; nothing is mounted.
+# Megatron-LM, Megatron-Bridge and VERL; nothing is mounted.
 set -euo pipefail
 
 # Required env: MODEL_PATH, BF16_MASTER_PATH, TRAIN_FILES, VAL_FILES.
@@ -265,8 +266,9 @@ else
   )
   ENGINE_ARGS=(model_engine=megatron)
 fi
-OUTPUT_ROOT="${OUTPUT_ROOT:-/workspace/outputs/nemotron_h_true_on_policy/${HARDWARE}/${MODE}}"
-RUN_NAME="${RUN_NAME:-nemotron_h_${HARDWARE}_${MODE}}"
+# The BI arms never share checkpoints or logs (resume_mode=auto would cross them).
+OUTPUT_ROOT="${OUTPUT_ROOT:-/workspace/outputs/nemotron_h_true_on_policy/${HARDWARE}/${MODE}_bi${VLLM_BATCH_INVARIANT}}"
+RUN_NAME="${RUN_NAME:-nemotron_h_${HARDWARE}_${MODE}_bi${VLLM_BATCH_INVARIANT}}"
 CKPT_DIR="${CKPT_DIR:-${OUTPUT_ROOT}/checkpoints/${RUN_NAME}}"
 LOG_FILE="${LOG_FILE:-${OUTPUT_ROOT}/${RUN_NAME}.log}"
 JSONL_FILE="${JSONL_FILE:-${OUTPUT_ROOT}/${RUN_NAME}.jsonl}"
