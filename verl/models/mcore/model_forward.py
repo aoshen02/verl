@@ -165,7 +165,7 @@ def gptmodel_forward_model_engine(
         input_ids_rmpad, packed_seq_params, position_ids_rmpad = preprocess_thd_engine(
             input_ids,
             pre_process=True,
-            mamba_seq_idx="M" in getattr(unwrap_model(model), "hybrid_layer_pattern", ""),
+            mamba_seq_idx="M" in (getattr(unwrap_model(model), "hybrid_layer_pattern", None) or ""),
             **thd_kwargs,
         )
         if vision_model:
