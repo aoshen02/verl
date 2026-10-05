@@ -166,6 +166,9 @@ class McoreEngineConfig(EngineConfig):
         use_distributed_optimizer (bool): Whether to use distributed optimizer.
         use_dist_checkpointing (bool): Whether to use distributed checkpointing.
         dist_checkpointing_path (Optional[str]): Path for distributed checkpointing.
+        hf_weights_path (Optional[str]): HF checkpoint the Megatron model is built and
+            initialized from when it differs from ``model.path`` (e.g. BF16 masters
+            for a quantized rollout checkpoint).
         dist_ckpt_optim_fully_reshardable (bool): Use fully reshardable optimizer checkpoints.
         distrib_optim_fully_reshardable_mem_efficient (bool): Use memory-efficient fully reshardable format.
         seed (int): Random seed for reproducibility.
@@ -198,6 +201,7 @@ class McoreEngineConfig(EngineConfig):
     pad_to_length_bucket: int = 512
     use_dist_checkpointing: bool = False
     dist_checkpointing_path: Optional[str] = None
+    hf_weights_path: Optional[str] = None
     dist_checkpointing_prefix: str = ""
     dist_ckpt_optim_fully_reshardable: bool = False
     distrib_optim_fully_reshardable_mem_efficient: bool = False

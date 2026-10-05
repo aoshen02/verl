@@ -449,6 +449,10 @@ def preprocess_thd_engine(
             "Megatron-core version does not provide. Upgrade Megatron-core or use the zigzag layout."
         )
 
+    if cp_size == 1 and _packed_seq_params_supports("total_tokens"):
+        # Mamba mixers derive per-sequence seq_idx from it; without it a packed
+        # micro-batch is scanned as one sequence.
+        extra_packed_args["total_tokens"] = cu_seqlens_padded_cpu[-1]
     packed_seq_params = PackedSeqParams(
         qkv_format="thd",
         cu_seqlens_q=cu_seqlens_padded,

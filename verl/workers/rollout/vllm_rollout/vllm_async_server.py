@@ -1338,7 +1338,8 @@ class vLLMHttpServer:
 
         # Handle QAT (Quantization-Aware Training) configuration
         qat_config_dict = getattr(self.config, "qat", {}) or {}
-        if qat_config_dict.get("enable", False):
+        # modelopt_mixed QAT serves the checkpoint's own ModelOpt config as is.
+        if qat_config_dict.get("enable", False) and qat_config_dict.get("mode") != "modelopt_mixed":
             from verl.utils.qat import QATConfig, load_quantization_config
 
             qat_config = QATConfig(**qat_config_dict)

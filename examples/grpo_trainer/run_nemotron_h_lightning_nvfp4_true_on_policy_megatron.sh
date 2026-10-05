@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # Nemotron-H Lightning NVFP4 true-on-policy for VERL.
-# aligned/quick_alignment_test use batch-invariant vLLM for exact probabilities.
+# VLLM_BATCH_INVARIANT=1 (default): batch-invariant vLLM rollout and a Megatron
+# Lite actor on the same vLLM kernels, for exact probabilities.
+# VLLM_BATCH_INVARIANT=0: the conventional baseline: default vLLM kernels, a
+# Megatron-Bridge actor on BF16 masters (QAT by default) and rollout routing
+# replay (R3); weights are requantized into the checkpoint's format at every sync.
 # Modes: quick_alignment_test (1x4, short workload, three steps), aligned.
 # Hardware: gb200 (1x4, PP1/EP4 actor, rollout DP4/EP4).
 # Image builds on `Dockerfile.nemotron_h_true_on_policy`, which installs vLLM,
@@ -8,8 +12,9 @@
 set -euo pipefail
 
 # Required env: MODEL_PATH, BF16_MASTER_PATH, TRAIN_FILES, VAL_FILES.
-# Optional env: training steps, batch size, lengths, output paths, WANDB_API_KEY,
-# WANDB_ENTITY, WANDB_MODE, WANDB_BASE_URL, and Hydra overrides.
+# Optional env: VLLM_BATCH_INVARIANT, training steps, batch size, lengths, output
+# paths, WANDB_API_KEY, WANDB_ENTITY, WANDB_MODE, WANDB_BASE_URL, and Hydra
+# overrides; with VLLM_BATCH_INVARIANT=0 also ACTOR_PRECISION and ROUTING_REPLAY.
 SEED="${SEED:-42}"
 ACTOR_LR="${ACTOR_LR:-1e-6}"
 MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-2048}"
@@ -99,14 +104,21 @@ case "${MODE}" in
     die "unknown mode '${MODE}'"
     ;;
 esac
+: "${VLLM_BATCH_INVARIANT:=1}"
 : "${ACTOR_OPTIMIZER:=fsdp2}"
-case "${ACTOR_OPTIMIZER}" in
-  # The actor's training state stays on the GPU during rollout; larger values
-  # run out of memory in vLLM's startup or FlashInfer autotune warmup.
-  fsdp2) : "${ROLLOUT_GPU_MEMORY_UTILIZATION:=0.65}" ;;
-  dist_opt) : "${ROLLOUT_GPU_MEMORY_UTILIZATION:=0.55}" ;;
-  *) die "ACTOR_OPTIMIZER must be dist_opt or fsdp2, got '${ACTOR_OPTIMIZER}'" ;;
-esac
+if [[ "${VLLM_BATCH_INVARIANT}" == 1 ]]; then
+  case "${ACTOR_OPTIMIZER}" in
+    # The actor's training state stays on the GPU during rollout; larger values
+    # run out of memory in vLLM's startup or FlashInfer autotune warmup.
+    fsdp2) : "${ROLLOUT_GPU_MEMORY_UTILIZATION:=0.65}" ;;
+    dist_opt) : "${ROLLOUT_GPU_MEMORY_UTILIZATION:=0.55}" ;;
+    *) die "ACTOR_OPTIMIZER must be dist_opt or fsdp2, got '${ACTOR_OPTIMIZER}'" ;;
+  esac
+elif [[ "${VLLM_BATCH_INVARIANT}" == 0 ]]; then
+  : "${ROLLOUT_GPU_MEMORY_UTILIZATION:=0.45}"
+else
+  die "VLLM_BATCH_INVARIANT must be 0 or 1, got '${VLLM_BATCH_INVARIANT}'"
+fi
 
 if [[ -n "${TRAINER_LOGGERS:-}" ]]; then
   :
@@ -120,30 +132,77 @@ fi
 
 # --- Alignment behavior ---
 : "${ROLLOUT_MAX_NUM_BATCHED_TOKENS:=16384}"
-# Routed experts: FlashInfer CuTe-DSL W4A16, the kernel the actor calls.
+# Routed experts: FlashInfer CuTe-DSL W4A16, the kernel the aligned actor calls
+# and the fastest BI=0 backend ("auto" picks Marlin, which fails on GB200).
 : "${ROLLOUT_MOE_BACKEND:=flashinfer_cutedsl}"
-export VLLM_BATCH_INVARIANT=1
+export VLLM_BATCH_INVARIANT
+# Routed-experts capture (R3) needs Model Runner V2 as well.
 export VLLM_USE_V2_MODEL_RUNNER=1
-MODE_ARGS=(
-  actor_rollout_ref.actor.engine.impl=vllm
-  +actor_rollout_ref.actor.engine.seed="${SEED}"
-  +actor_rollout_ref.actor.engine.full_determinism=True
-  actor_rollout_ref.actor.engine.attention_backend_override=null
-  # True gives the n samples of a prompt one vLLM seed; batch invariance, not
-  # full determinism, makes rollout and actor agree.
-  actor_rollout_ref.rollout.full_determinism=False
-  actor_rollout_ref.rollout.seed="${SEED}"
-  +actor_rollout_ref.rollout.engine_kwargs.vllm.all2all_backend=flashinfer_nvlink_one_sided
-)
-
-OPTIMIZER_ARGS=(
-  +actor_rollout_ref.actor.engine.impl_cfg.optimizer="${ACTOR_OPTIMIZER}"
-  actor_rollout_ref.actor.engine.param_offload=False
-  actor_rollout_ref.actor.engine.optimizer_offload=True
-  +actor_rollout_ref.actor.optim.override_optimizer_config.offload_fraction=1.0
-  +actor_rollout_ref.actor.optim.override_optimizer_config.use_precision_aware_optimizer=True
-  +actor_rollout_ref.actor.optim.override_optimizer_config.decoupled_weight_decay=True
-)
+if [[ "${VLLM_BATCH_INVARIANT}" == 1 ]]; then
+  MODE_ARGS=(
+    actor_rollout_ref.actor.engine.impl=vllm
+    +actor_rollout_ref.actor.engine.seed="${SEED}"
+    +actor_rollout_ref.actor.engine.full_determinism=True
+    actor_rollout_ref.actor.engine.attention_backend_override=null
+    # True gives the n samples of a prompt one vLLM seed; batch invariance, not
+    # full determinism, makes rollout and actor agree.
+    actor_rollout_ref.rollout.full_determinism=False
+    actor_rollout_ref.rollout.seed="${SEED}"
+    +actor_rollout_ref.rollout.engine_kwargs.vllm.all2all_backend=flashinfer_nvlink_one_sided
+    actor_rollout_ref.rollout.enable_prefix_caching=False
+  )
+  OPTIMIZER_ARGS=(
+    +actor_rollout_ref.actor.engine.impl_cfg.optimizer="${ACTOR_OPTIMIZER}"
+    actor_rollout_ref.actor.engine.param_offload=False
+    actor_rollout_ref.actor.engine.optimizer_offload=True
+    +actor_rollout_ref.actor.optim.override_optimizer_config.offload_fraction=1.0
+    +actor_rollout_ref.actor.optim.override_optimizer_config.use_precision_aware_optimizer=True
+    +actor_rollout_ref.actor.optim.override_optimizer_config.decoupled_weight_decay=True
+  )
+else
+  : "${ROUTING_REPLAY:=R3}"
+  : "${ACTOR_PRECISION:=qat}"
+  MODE_ARGS=(
+    actor_rollout_ref.rollout.seed="${SEED}"
+    # A dummy-initialized engine serves garbage after the first refit at BI=0
+    # (state derived from the dummy weights survives layerwise reload); start
+    # from the checkpoint instead.
+    actor_rollout_ref.rollout.load_format=auto
+    +actor_rollout_ref.rollout.engine_kwargs.vllm.all2all_backend=flashinfer_nvlink_one_sided
+  )
+  case "${ROUTING_REPLAY}" in
+    R3) MODE_ARGS+=(
+          actor_rollout_ref.actor.megatron.router_replay.mode=R3
+          actor_rollout_ref.rollout.enable_rollout_routing_replay=True
+        ) ;;
+    disabled) ;;
+    *) die "ROUTING_REPLAY must be R3 or disabled, got '${ROUTING_REPLAY}'" ;;
+  esac
+  case "${ACTOR_PRECISION}" in
+    bf16) ;;
+    mxfp8) MODE_ARGS+=(
+          ++actor_rollout_ref.actor.megatron.override_transformer_config.fp8=e4m3
+          ++actor_rollout_ref.actor.megatron.override_transformer_config.fp8_recipe=mxfp8
+        ) ;;
+    # Weight fake-quant (STE) whose forward value is the deployed NVFP4/FP8 weight.
+    qat) MODE_ARGS+=(
+          actor_rollout_ref.actor.megatron.qat.enable=True
+          actor_rollout_ref.actor.megatron.qat.mode=modelopt_mixed
+        ) ;;
+    *) die "ACTOR_PRECISION must be bf16, qat or mxfp8, got '${ACTOR_PRECISION}'" ;;
+  esac
+  # Optimizer state and FP32 masters stay on the host between updates (as DS4's
+  # baseline-r3); full offload of params/grads as well exhausts host memory.
+  OPTIMIZER_ARGS=(
+    actor_rollout_ref.actor.megatron.param_offload=False
+    actor_rollout_ref.actor.megatron.optimizer_offload=False
+    +actor_rollout_ref.actor.optim.override_optimizer_config.chunked_optimizer_state_offload=True
+    +actor_rollout_ref.actor.optim.override_optimizer_config.optimizer_state_offload_chunk_size_mb=1024
+    # Checkpoints hold Megatron dist-checkpoint shards; the HF safetensors export
+    # of the model fails at this host-memory level.
+    actor_rollout_ref.actor.megatron.use_dist_checkpointing=True
+  )
+fi
 
 # The ModelOpt checkpoint refits through vLLM's layerwise reload.
 VLLM_WORKER_EXTENSION="verl_mlite.rollout.vllm_worker.MLiteVLLMColocateWorkerExtension"
@@ -158,31 +217,54 @@ VLLM_WORKER_EXTENSION="verl_mlite.rollout.vllm_worker.MLiteVLLMColocateWorkerExt
 : "${ROLLOUT_EP:=4}"
 : "${ROLLOUT_AGENT_WORKERS:=8}"
 
-runtime_config_root="$(mktemp -d /tmp/nemotron-h-true-on-policy-config.XXXXXX)"
-trap 'rm -rf "${runtime_config_root}"' EXIT
-mkdir -p "${runtime_config_root}/critic" "${runtime_config_root}/model_engine"
-printf '%s\n' \
-  '# @package _global_' \
-  'model_engine: mlite' \
-  >"${runtime_config_root}/model_engine/mlite.yaml"
-printf '%s\n' \
-  '_target_: verl.workers.config.CriticConfig' \
-  'enable: false' \
-  'strategy: mlite' \
-  >"${runtime_config_root}/critic/mlite_critic.yaml"
-
 ROLLOUT_TP="${ROLLOUT_TP:-1}"
 MAX_MODEL_LEN=$((MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH))
-ACTOR_ARGS=(
-  actor_rollout_ref.actor.engine.pp="${ACTOR_PP}"
-  actor_rollout_ref.actor.engine.cp="${ACTOR_CP}"
-  actor_rollout_ref.actor.engine.ep="${ACTOR_EP}"
-  # The actor exports its NVFP4/FP8 deployment bytes as stored.
-  actor_rollout_ref.actor.engine.export_dtype=null
-  +actor_rollout_ref.actor.engine.impl_cfg.bf16_master_path="${BF16_MASTER_PATH}"
-  +actor_rollout_ref.actor.engine.impl_cfg.recompute=full
-)
-ENGINE_ARGS=("hydra.searchpath=[file://${runtime_config_root},pkg://verl_mlite.config]" model_engine=mlite)
+if [[ "${VLLM_BATCH_INVARIANT}" == 1 ]]; then
+  runtime_config_root="$(mktemp -d /tmp/nemotron-h-true-on-policy-config.XXXXXX)"
+  trap 'rm -rf "${runtime_config_root}"' EXIT
+  mkdir -p "${runtime_config_root}/critic" "${runtime_config_root}/model_engine"
+  printf '%s\n' \
+    '# @package _global_' \
+    'model_engine: mlite' \
+    >"${runtime_config_root}/model_engine/mlite.yaml"
+  printf '%s\n' \
+    '_target_: verl.workers.config.CriticConfig' \
+    'enable: false' \
+    'strategy: mlite' \
+    >"${runtime_config_root}/critic/mlite_critic.yaml"
+  ACTOR_ARGS=(
+    actor_rollout_ref.actor.engine.pp="${ACTOR_PP}"
+    actor_rollout_ref.actor.engine.cp="${ACTOR_CP}"
+    actor_rollout_ref.actor.engine.ep="${ACTOR_EP}"
+    # The actor exports its NVFP4/FP8 deployment bytes as stored.
+    actor_rollout_ref.actor.engine.export_dtype=null
+    +actor_rollout_ref.actor.engine.impl_cfg.bf16_master_path="${BF16_MASTER_PATH}"
+    +actor_rollout_ref.actor.engine.impl_cfg.recompute=full
+  )
+  ENGINE_ARGS=("hydra.searchpath=[file://${runtime_config_root},pkg://verl_mlite.config]" model_engine=mlite)
+else
+  ACTOR_ARGS=(
+    actor_rollout_ref.actor.megatron.tensor_model_parallel_size=1
+    actor_rollout_ref.actor.megatron.pipeline_model_parallel_size="${ACTOR_PP}"
+    actor_rollout_ref.actor.megatron.context_parallel_size="${ACTOR_CP}"
+    actor_rollout_ref.actor.megatron.expert_model_parallel_size="${ACTOR_EP}"
+    actor_rollout_ref.actor.megatron.expert_tensor_parallel_size=1
+    actor_rollout_ref.actor.megatron.use_mbridge=True
+    actor_rollout_ref.actor.megatron.seed="${SEED}"
+    # Masters come from the BF16 release; MODEL_PATH (NVFP4) is the rollout's.
+    actor_rollout_ref.actor.megatron.hf_weights_path="${BF16_MASTER_PATH}"
+    ++actor_rollout_ref.actor.megatron.override_transformer_config.recompute_granularity=full
+    ++actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method=uniform
+    ++actor_rollout_ref.actor.megatron.override_transformer_config.recompute_num_layers=1
+    # RL trains the backbone only: no MTP block, frozen expert-bias updates.
+    ++actor_rollout_ref.actor.megatron.override_transformer_config.mtp_num_layers=null
+    ++actor_rollout_ref.actor.megatron.override_transformer_config.mtp_hybrid_override_pattern=null
+    ++actor_rollout_ref.actor.megatron.override_transformer_config.moe_router_bias_update_rate=0.0
+    ++actor_rollout_ref.actor.megatron.override_transformer_config.moe_router_dtype=fp32
+    actor_rollout_ref.model.use_fused_kernels=False
+  )
+  ENGINE_ARGS=(model_engine=megatron)
+fi
 OUTPUT_ROOT="${OUTPUT_ROOT:-/workspace/outputs/nemotron_h_true_on_policy/${HARDWARE}/${MODE}}"
 RUN_NAME="${RUN_NAME:-nemotron_h_${HARDWARE}_${MODE}}"
 CKPT_DIR="${CKPT_DIR:-${OUTPUT_ROOT}/checkpoints/${RUN_NAME}}"
@@ -220,7 +302,7 @@ for name in "${RAY_ENV_NAMES[@]}"; do
 done
 
 # Cluster launchers should point MLITE_DCP_LOCAL_STAGE_DIR at node-local disk.
-for name in WANDB_ENTITY WANDB_MODE WANDB_BASE_URL HF_HUB_OFFLINE NCCL_MNNVL_ENABLE MLITE_DCP_LOCAL_STAGE_DIR; do
+for name in WANDB_ENTITY WANDB_MODE WANDB_BASE_URL HF_HUB_OFFLINE NCCL_MNNVL_ENABLE NCCL_CUMEM_ENABLE MLITE_DCP_LOCAL_STAGE_DIR; do
   if [[ -v "${name}" ]]; then
     RAY_RUNTIME_ENV+=(
       "+ray_kwargs.ray_init.runtime_env.env_vars.${name}=\"${!name}\""
@@ -284,7 +366,6 @@ HYDRA_ARGS=(
   actor_rollout_ref.rollout.max_model_len="${MAX_MODEL_LEN}"
   actor_rollout_ref.rollout.max_num_seqs="${ROLLOUT_MAX_NUM_SEQS}"
   actor_rollout_ref.rollout.max_num_batched_tokens="${ROLLOUT_MAX_NUM_BATCHED_TOKENS}"
-  actor_rollout_ref.rollout.enable_prefix_caching=False
   actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=1024
   +actor_rollout_ref.rollout.engine_kwargs.vllm.worker_extension_cls="${VLLM_WORKER_EXTENSION}"
   +actor_rollout_ref.rollout.engine_kwargs.vllm.kv_cache_dtype=fp8_e4m3
@@ -330,8 +411,14 @@ print_command() {
   printf '\n'
 }
 
-printf 'MODE=%s HARDWARE=%s TOPOLOGY=%sx%s OPTIMIZER=%s\n' \
-  "${MODE}" "${HARDWARE}" "${NNODES}" "${NGPUS_PER_NODE}" "${ACTOR_OPTIMIZER}"
+if [[ "${VLLM_BATCH_INVARIANT}" == 1 ]]; then
+  ACTOR_SUMMARY="impl=vllm OPTIMIZER=${ACTOR_OPTIMIZER}"
+else
+  ACTOR_SUMMARY="impl=megatron PRECISION=${ACTOR_PRECISION} ROUTING_REPLAY=${ROUTING_REPLAY}"
+fi
+printf 'MODE=%s HARDWARE=%s TOPOLOGY=%sx%s BI=%s %s\n' \
+  "${MODE}" "${HARDWARE}" "${NNODES}" "${NGPUS_PER_NODE}" "${VLLM_BATCH_INVARIANT}" \
+  "${ACTOR_SUMMARY}"
 
 if [[ "${DRY_RUN:-0}" == 1 ]]; then
   print_command

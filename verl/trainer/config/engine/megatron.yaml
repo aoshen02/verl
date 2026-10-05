@@ -37,6 +37,9 @@ use_dist_checkpointing: False
 # distributed checkpointing path
 dist_checkpointing_path: null
 
+# HF checkpoint to build/initialize the Megatron model from, if not model.path
+hf_weights_path: null
+
 # Whether to use dynamic context parallel scheduling
 dynamic_context_parallel: False
 

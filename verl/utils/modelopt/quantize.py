@@ -16,9 +16,12 @@
 """ModelOpt NVFP4 quantization config and application for Megatron QAT."""
 
 import copy
+import fnmatch
 
 import modelopt.torch.quantization as mtq
+import torch
 import torch.nn as nn
+from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.quantization.config import _default_disabled_quantizer_cfg
 
 _NVFP4_W4A16_QUANTIZER_CFG = {
@@ -69,12 +72,96 @@ def build_quantize_config(
     return {"quant_cfg": quant_cfg, "algorithm": "max"}
 
 
+# Megatron (TE spec) weight quantizers of a Nemotron-H ModelOpt MIXED_PRECISION
+# deployment: W4A16 NVFP4 routed/shared experts and lm_head, FP8 Mamba in/out_proj.
+_MIXED_PRECISION_WEIGHT_QUANTIZERS = {
+    "*experts.linear_fc*weight_quantizer": "W4A16_NVFP4",
+    "*output_layer.weight_quantizer": "W4A16_NVFP4",
+    "*mixer.in_proj.weight_quantizer": "FP8",
+    "*mixer.out_proj.weight_quantizer": "FP8",
+}
+
+
+def _dequantize(algorithm: str, tensors: dict[str, torch.Tensor]) -> torch.Tensor:
+    from megatron.lite.model.nemotron_h.quantization import nvfp4_decode_values
+
+    if algorithm == "FP8":
+        return tensors["weight"].float() * tensors["weight_scale"].float()
+    values = nvfp4_decode_values(tensors["weight"])
+    rows, cols = values.shape
+    unit = tensors["weight_scale"].float() * tensors["weight_scale_2"].float().reshape(())
+    return (values.reshape(rows, cols // 16, 16) * unit[..., None]).reshape(rows, cols)
+
+
+class RequantSTEQuantizer(TensorQuantizer):
+    """Weight fake-quantizer whose forward value is the deployed weight.
+
+    The forward pass sees dequant(requantize(w)), with requantize the rule the
+    exporter uses at every sync (so trained and served weights agree); the
+    gradient passes straight through to the BF16 master.
+    """
+
+    def __init__(self, algorithm: str):
+        super().__init__()
+        self.algorithm = algorithm
+
+    def forward(self, inputs):
+        from megatron.lite.model.nemotron_h.quantization import requantize
+
+        if not isinstance(inputs, torch.Tensor) or inputs.ndim != 2:
+            raise RuntimeError(f"RequantSTEQuantizer expects a 2-D weight, got {type(inputs)}")
+        with torch.no_grad():
+            deployed = _dequantize(self.algorithm, requantize(self.algorithm, inputs.detach().to(torch.bfloat16)))
+        return inputs + (deployed.to(inputs.dtype) - inputs).detach()
+
+
+def _te_grouped_weight_only_fn(package, func_name, self, *args):
+    """Weight-only replacement for ModelOpt's TE GroupedLinear functional.
+
+    ModelOpt 0.44 reads the GEMM count from ``non_tensor_args[0]``, which is
+    ``apply_bias`` in TE 2.17; ``*weights_and_biases`` (2 * num_gemms tensors)
+    still trails the arguments.
+    """
+    num_gemms = self.num_gemms
+    weights_start = len(args) - 2 * num_gemms
+    new_args = list(args)
+    for i in range(weights_start, weights_start + num_gemms):
+        new_args[i] = self.weight_quantizer(args[i])
+    return getattr(package, func_name)(*new_args)
+
+
+def apply_mixed_precision_qat(model: nn.Module) -> nn.Module:
+    """Insert deployment-matching weight fake-quant on the quantized deployment layers."""
+    from modelopt.torch.quantization.plugins.transformer_engine import _QuantTEGroupedLinear
+
+    _QuantTEGroupedLinear._quantized_linear_fn = staticmethod(_te_grouped_weight_only_fn)
+    quant_cfg = [{"quantizer_name": "*", "enable": False}]
+    for name in _MIXED_PRECISION_WEIGHT_QUANTIZERS:
+        quant_cfg.append({"quantizer_name": name, "cfg": {"num_bits": (4, 3), "axis": None}, "enable": True})
+    mtq.quantize(model, {"quant_cfg": quant_cfg, "algorithm": None})
+    replaced = 0
+    for module_name, module in model.named_modules():
+        quantizer = getattr(module, "weight_quantizer", None)
+        if not isinstance(quantizer, TensorQuantizer) or not quantizer.is_enabled:
+            continue
+        name = f"{module_name}.weight_quantizer"
+        algorithm = next(a for p, a in _MIXED_PRECISION_WEIGHT_QUANTIZERS.items() if fnmatch.fnmatch(name, p))
+        module.weight_quantizer = RequantSTEQuantizer(algorithm).to(next(module.parameters()).device)
+        replaced += 1
+    if replaced == 0:
+        raise RuntimeError("mixed-precision QAT matched no weight quantizer")
+    print(f"[QAT modelopt_mixed] deployment-matching weight fake-quant on {replaced} modules")
+    return model
+
+
 def apply_qat(
     model: nn.Module,
     qat_mode: str,
     ignore_patterns: list[str] | None = None,
 ) -> nn.Module:
     """Apply Quantization-Aware Training to a Megatron model."""
+    if qat_mode == "modelopt_mixed":
+        return apply_mixed_precision_qat(model)
     config = build_quantize_config(qat_mode, ignore_patterns)
     mtq.quantize(model, config)
     return model

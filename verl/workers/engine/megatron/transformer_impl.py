@@ -310,9 +310,11 @@ class MegatronEngine(BaseEngine):
         self.provider = None
         from verl.models.mcore.bridge import AutoBridge
 
+        self._hf_weights_path = self.engine_config.hf_weights_path or self.model_config.local_path
+
         # Use Megatron-Bridge to convert HF config to Megatron config
         bridge = AutoBridge.from_hf_pretrained(
-            self.model_config.local_path, trust_remote_code=self.model_config.trust_remote_code
+            self._hf_weights_path, trust_remote_code=self.model_config.trust_remote_code
         )
         # Get Megatron provider and configure it
         provider = bridge.to_megatron_provider(load_weights=False)
@@ -359,7 +361,7 @@ class MegatronEngine(BaseEngine):
             else:
                 provider_overrides["enable_routing_replay"] = True
 
-        if self._qat_enabled:
+        if self._qat_enabled and self._qat_config.mode != "modelopt_mixed":
             from megatron.bridge.models.gpt_provider import modelopt_transformer_layer_spec
 
             provider.transformer_layer_spec = modelopt_transformer_layer_spec
@@ -449,14 +451,16 @@ class MegatronEngine(BaseEngine):
         self.tf_config = updated_tf_config
         print(f"module: {len(module)}")
 
-        if self.engine_config.use_dist_checkpointing:
+        # Without an initial dist checkpoint, dist checkpointing only selects the
+        # format of saved checkpoints; the model starts from the HF weights.
+        if self.engine_config.use_dist_checkpointing and self.engine_config.dist_checkpointing_path:
             load_mcore_dist_weights(
                 module, self.engine_config.dist_checkpointing_path, is_value_model=self.is_value_model
             )
         else:
             allowed_mismatched_params = ["output_layer.weight"] if self.is_value_model else []
             self.bridge.load_hf_weights(
-                module, self.model_config.local_path, allowed_mismatched_params=allowed_mismatched_params
+                module, self._hf_weights_path, allowed_mismatched_params=allowed_mismatched_params
             )
 
         if torch.distributed.get_rank() == 0:
@@ -1000,13 +1004,30 @@ class MegatronEngine(BaseEngine):
                 else self.bridge.export_hf_weights(self.module, conversion_tasks=conversion_tasks)
             )
 
+        # A ModelOpt mixed-precision rollout checkpoint receives its own checkpoint format.
+        if not adapter_only and (exporter := self._mixed_precision_exporter()) is not None:
+            per_tensor_param = exporter(per_tensor_param)
+
         # QAT: process weights through QATWeightExporter for quantized weight sync to vLLM
-        if self._qat_enabled:
+        if self._qat_enabled and self._qat_config.mode != "modelopt_mixed":
             from verl.utils.modelopt import export_qat_weights
 
             per_tensor_param = export_qat_weights(per_tensor_param, self.module, self._qat_config.mode, self.bridge)
 
         return per_tensor_param, peft_config
+
+    def _mixed_precision_exporter(self):
+        if not hasattr(self, "_mp_exporter"):
+            from verl.utils.modelopt.mixed_precision_export import (
+                ModelOptMixedPrecisionExporter,
+                load_mixed_precision_config,
+            )
+
+            quant = load_mixed_precision_config(self.model_config.local_path)
+            self._mp_exporter = (
+                ModelOptMixedPrecisionExporter(self.model_config.local_path, quant) if quant is not None else None
+            )
+        return self._mp_exporter
 
     def _mcore_export_index(self):
         """Build (once) the per-parameter delta export index: geometry specs and
