@@ -169,6 +169,8 @@ class McoreEngineConfig(EngineConfig):
         hf_weights_path (Optional[str]): HF checkpoint the Megatron model is built and
             initialized from when it differs from ``model.path`` (e.g. BF16 masters
             for a quantized rollout checkpoint).
+        mixed_precision_export (bool): Requantize every weight sync into the
+            ModelOpt MIXED_PRECISION checkpoint format of ``model.path``.
         dist_ckpt_optim_fully_reshardable (bool): Use fully reshardable optimizer checkpoints.
         distrib_optim_fully_reshardable_mem_efficient (bool): Use memory-efficient fully reshardable format.
         seed (int): Random seed for reproducibility.
@@ -202,6 +204,7 @@ class McoreEngineConfig(EngineConfig):
     use_dist_checkpointing: bool = False
     dist_checkpointing_path: Optional[str] = None
     hf_weights_path: Optional[str] = None
+    mixed_precision_export: bool = False
     dist_checkpointing_prefix: str = ""
     dist_ckpt_optim_fully_reshardable: bool = False
     distrib_optim_fully_reshardable_mem_efficient: bool = False

@@ -242,6 +242,7 @@ def preprocess_thd_engine(
     min_local_rows: int | None = None,
     pad_to_length_bucket: int | None = None,
     cp_layout: ContextParallelLayout = "zigzag",
+    mamba_seq_idx: bool = False,
 ) -> tuple[torch.Tensor, PackedSeqParams, torch.Tensor | None]:
     """Pack nested THD sequences and shard their rows across CP ranks.
 
@@ -449,9 +450,11 @@ def preprocess_thd_engine(
             "Megatron-core version does not provide. Upgrade Megatron-core or use the zigzag layout."
         )
 
-    if cp_size == 1 and _packed_seq_params_supports("total_tokens"):
+    if mamba_seq_idx:
         # Mamba mixers derive per-sequence seq_idx from it; without it a packed
         # micro-batch is scanned as one sequence.
+        if cp_size != 1 or not _packed_seq_params_supports("total_tokens"):
+            raise ValueError("Packed Mamba sequences need CP=1 and PackedSeqParams.total_tokens")
         extra_packed_args["total_tokens"] = cu_seqlens_padded_cpu[-1]
     packed_seq_params = PackedSeqParams(
         qkv_format="thd",

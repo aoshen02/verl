@@ -1004,9 +1004,8 @@ class MegatronEngine(BaseEngine):
                 else self.bridge.export_hf_weights(self.module, conversion_tasks=conversion_tasks)
             )
 
-        # A ModelOpt mixed-precision rollout checkpoint receives its own checkpoint format.
-        if not adapter_only and (exporter := self._mixed_precision_exporter()) is not None:
-            per_tensor_param = exporter(per_tensor_param)
+        if not adapter_only and self.engine_config.mixed_precision_export:
+            per_tensor_param = self._mixed_precision_exporter()(per_tensor_param)
 
         # QAT: process weights through QATWeightExporter for quantized weight sync to vLLM
         if self._qat_enabled and self._qat_config.mode != "modelopt_mixed":
@@ -1024,9 +1023,9 @@ class MegatronEngine(BaseEngine):
             )
 
             quant = load_mixed_precision_config(self.model_config.local_path)
-            self._mp_exporter = (
-                ModelOptMixedPrecisionExporter(self.model_config.local_path, quant) if quant is not None else None
-            )
+            if quant is None:
+                raise ValueError(f"mixed_precision_export: {self.model_config.local_path} is not MIXED_PRECISION")
+            self._mp_exporter = ModelOptMixedPrecisionExporter(self.model_config.local_path, quant)
         return self._mp_exporter
 
     def _mcore_export_index(self):

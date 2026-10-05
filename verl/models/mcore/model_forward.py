@@ -163,7 +163,10 @@ def gptmodel_forward_model_engine(
         # Rank-local THD rows + positions for every model and PP stage: rope LLMs only read positions
         # in MTP; MRoPE positions, when present, are read on every stage.
         input_ids_rmpad, packed_seq_params, position_ids_rmpad = preprocess_thd_engine(
-            input_ids, pre_process=True, **thd_kwargs
+            input_ids,
+            pre_process=True,
+            mamba_seq_idx="M" in getattr(unwrap_model(model), "hybrid_layer_pattern", ""),
+            **thd_kwargs,
         )
         if vision_model:
             input_ids_rmpad, attention_mask, position_ids_rmpad = preprocess_vlm_thd_engine(
