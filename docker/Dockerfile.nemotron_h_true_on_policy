@@ -24,6 +24,9 @@ ARG MEGATRON_REVISION=6f20b63b8b70c73c9653cf6f1479f5dcdff51a09
 # (state-spaces/mamba#972).
 ARG CAUSAL_CONV1D_REVISION=4f6ae4e26ae5fe8af9372f8d312ab25cc4595223
 ARG MAMBA_SSM_REVISION=0048fbf2e7b2f214dcbe703ea3dec2b9647595e1
+# The VLLM_BATCH_INVARIANT=0 baseline actor (verl Megatron engine).
+ARG MEGATRON_BRIDGE_REPO=https://github.com/NVIDIA-NeMo/Megatron-Bridge.git
+ARG MEGATRON_BRIDGE_REVISION=c0e164ed2aedac4ad1c877780e2564a19d5d54ec
 ARG DEEPEP_REPO=https://github.com/ISEEKYAN/DeepEP.git
 ARG DEEPEP_REVISION=2cd85412155cbc07452f552ac6e2f446a26f8869
 ARG NVSHMEM_VERSION=3.4.5
@@ -46,6 +49,8 @@ ARG MEGATRON_REPO
 ARG MEGATRON_REVISION
 ARG CAUSAL_CONV1D_REVISION
 ARG MAMBA_SSM_REVISION
+ARG MEGATRON_BRIDGE_REPO
+ARG MEGATRON_BRIDGE_REVISION
 ARG DEEPEP_REPO
 ARG DEEPEP_REVISION
 ARG NVSHMEM_VERSION
@@ -95,6 +100,7 @@ git -C /src/vllm fetch --no-tags "${VLLM_TAG_REPO}" \
   "refs/tags/${VLLM_BASE_TAG}:refs/tags/${VLLM_BASE_TAG}"
 
 clone_exact Megatron-LM "${MEGATRON_REPO}" "${MEGATRON_REVISION}"
+clone_exact Megatron-Bridge "${MEGATRON_BRIDGE_REPO}" "${MEGATRON_BRIDGE_REVISION}"
 clone_exact DeepEP "${DEEPEP_REPO}" "${DEEPEP_REVISION}"
 
 python3 -m pip install uv==0.12.5
@@ -134,7 +140,7 @@ set -eux
 . /tmp/arch.env
 lite=/src/Megatron-LM/experimental/lite
 uv pip install --no-build-isolation --no-deps \
-  /src/Megatron-LM "${lite}" "${lite}/examples/verl"
+  /src/Megatron-LM "${lite}" "${lite}/examples/verl" /src/Megatron-Bridge
 CAUSAL_CONV1D_FORCE_BUILD=TRUE MAMBA_FORCE_BUILD=TRUE \
   uv pip install --no-build-isolation --no-deps \
   "causal-conv1d @ git+https://github.com/Dao-AILab/causal-conv1d.git@${CAUSAL_CONV1D_REVISION}" \
@@ -159,8 +165,9 @@ uv pip freeze | grep -iE '^(torch|torchvision|torchaudio|vllm|flashinfer-python|
   >/tmp/constraints.txt
 grep -i '^transformers==' /tmp/constraints.txt | cat - /tmp/base-image-packages.txt >/tmp/overrides.txt
 # The Megatron Lite verl config needs omegaconf 2.4 (hydra-core 1.4).
+# Megatron-Bridge imports megatron.energon at load.
 uv pip install -c /tmp/constraints.txt --override /tmp/overrides.txt "/src/verl[verl-core]" \
-  hydra-core==1.4.0.dev8
+  hydra-core==1.4.0.dev8 megatron-energon==7.4.1
 install -D -m 0755 \
   /src/verl/examples/grpo_trainer/run_nemotron_h_lightning_nvfp4_true_on_policy_megatron.sh \
   /opt/nemotron/recipe/run_nemotron_h_lightning_nvfp4_true_on_policy_megatron.sh
@@ -178,6 +185,7 @@ LD_LIBRARY_PATH=/tmp/cuda-stubs${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}} python - 
 import os
 
 import deep_ep  # noqa: F401
+import megatron.bridge.models.nemotronh  # noqa: F401
 import megatron.lite.model.nemotron_h.vllm.protocol  # noqa: F401
 import verl.trainer.main_ppo  # noqa: F401
 import verl_mlite.engine  # noqa: F401
