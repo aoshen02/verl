@@ -7,7 +7,9 @@
 # mcore) on the BF16 release and rollout routing replay (R3); every sync
 # requantizes the weights into the checkpoint's ModelOpt format. The actor runs
 # weight QAT by default (ACTOR_PRECISION=qat: forward on the deployed NVFP4/FP8
-# weights); ACTOR_PRECISION=bf16 trains on the BF16 masters as they are.
+# weights); ACTOR_PRECISION=bf16 trains on the BF16 masters as they are. Like the
+# baseline-r3 recipe, it logs to W&B project verl-nemotron-h-baseline-r3 and
+# forwards NCCL_CUMEM_ENABLE to an existing Ray cluster when set.
 # Modes: quick_alignment_test (1x4, short workload, three steps), aligned.
 # Hardware: gb200 (1x4, PP1/EP4 actor, rollout DP4/EP4).
 # Image builds on `Dockerfile.nemotron_h_true_on_policy`, which installs vLLM,
@@ -21,7 +23,6 @@ set -euo pipefail
 SEED="${SEED:-42}"
 ACTOR_LR="${ACTOR_LR:-1e-6}"
 MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-2048}"
-PROJECT_NAME="${PROJECT_NAME:-verl-nemotron-h-true-on-policy}"
 
 usage() {
   echo "usage: $0 --hardware gb200 --mode {quick_alignment_test|aligned} [Hydra overrides...]"
@@ -148,6 +149,8 @@ if [[ "${VLLM_BATCH_INVARIANT}" == 1 ]]; then
     *) die "ACTOR_OPTIMIZER must be dist_opt or fsdp2, got '${ACTOR_OPTIMIZER}'" ;;
   esac
   ARM=
+  PROJECT_NAME="${PROJECT_NAME:-verl-nemotron-h-true-on-policy}"
+  ARM_ENV_NAMES=()
   ACTOR_SUMMARY="OPTIMIZER=${ACTOR_OPTIMIZER}"
   MODE_ARGS=(
     actor_rollout_ref.actor.engine.impl=vllm
@@ -199,6 +202,8 @@ elif [[ "${VLLM_BATCH_INVARIANT}" == 0 ]]; then
   # Packed Mamba sequences need their per-sequence seq_idx, which needs CP=1.
   [[ "${ACTOR_CP}" == 1 ]] || die "VLLM_BATCH_INVARIANT=0 requires ACTOR_CP=1, got '${ACTOR_CP}'"
   ARM=_bi0
+  PROJECT_NAME="${PROJECT_NAME:-verl-nemotron-h-baseline-r3}"
+  ARM_ENV_NAMES=(NCCL_CUMEM_ENABLE)
   PREFIX_CACHING_ARGS=()
   ACTOR_SUMMARY="BI=0 PRECISION=${ACTOR_PRECISION} ROUTING_REPLAY=R3"
   MODE_ARGS=(
@@ -299,7 +304,8 @@ for name in "${RAY_ENV_NAMES[@]}"; do
 done
 
 # Cluster launchers should point MLITE_DCP_LOCAL_STAGE_DIR at node-local disk.
-for name in WANDB_ENTITY WANDB_MODE WANDB_BASE_URL HF_HUB_OFFLINE NCCL_MNNVL_ENABLE MLITE_DCP_LOCAL_STAGE_DIR; do
+for name in WANDB_ENTITY WANDB_MODE WANDB_BASE_URL HF_HUB_OFFLINE NCCL_MNNVL_ENABLE MLITE_DCP_LOCAL_STAGE_DIR \
+  "${ARM_ENV_NAMES[@]}"; do
   if [[ -v "${name}" ]]; then
     RAY_RUNTIME_ENV+=(
       "+ray_kwargs.ray_init.runtime_env.env_vars.${name}=\"${!name}\""
