@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import pickle
 import random
 
 import numpy as np
@@ -1227,6 +1228,38 @@ def test_numpy_dataproto_serialization_skips_tensordict_consolidation(monkeypatc
     torch.testing.assert_close(restored.batch["obs"], data.batch["obs"])
     assert restored.non_tensor_batch["labels"].tolist() == ["a", "b", "c"]
     assert restored.meta_info == {"step": 1}
+
+
+def test_dataproto_serialization_reuses_consolidated_batch(monkeypatch):
+    """A consolidated, locked batch is pickled without allocating another consolidated copy."""
+    monkeypatch.delenv("VERL_DATAPROTO_SERIALIZATION_METHOD", raising=False)
+    data = DataProto.from_dict(tensors={"ids": torch.arange(12).reshape(3, 4), "logp": torch.rand(3, 4)})
+    data.batch = data.batch.consolidate().lock_()
+
+    def fail_on_consolidate(*args, **kwargs):
+        pytest.fail("TensorDict.consolidate() should not be called for an already consolidated batch")
+
+    monkeypatch.setattr(TensorDict, "consolidate", fail_on_consolidate)
+
+    restored = pickle.loads(pickle.dumps(data))
+
+    for key in ("ids", "logp"):
+        torch.testing.assert_close(restored.batch[key], data.batch[key])
+
+
+def test_dataproto_serialization_keeps_edits_to_unpickled_batch(monkeypatch):
+    """An unpickled batch still reports is_consolidated(); edits made after unpickling must survive re-pickling."""
+    monkeypatch.delenv("VERL_DATAPROTO_SERIALIZATION_METHOD", raising=False)
+    data = DataProto.from_dict(tensors={"ids": torch.arange(12).reshape(3, 4)})
+    data.batch = data.batch.consolidate()
+    received = pickle.loads(pickle.dumps(data))
+
+    received.batch["ids"] = torch.zeros(3, 4, dtype=torch.long)
+    received.batch["new"] = torch.ones(3, 2)
+    restored = pickle.loads(pickle.dumps(received))
+
+    torch.testing.assert_close(restored.batch["ids"], torch.zeros(3, 4, dtype=torch.long))
+    torch.testing.assert_close(restored.batch["new"], torch.ones(3, 2))
 
 
 def test_serialize_dataproto_with_empty_tensordict():
