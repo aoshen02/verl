@@ -232,6 +232,14 @@ class McoreEngineConfig(EngineConfig):
         if self.tensor_model_parallel_size == 1:
             warnings.warn("set sequence parallel to false as TP size is 1", stacklevel=2)
             self.sequence_parallel = False
+        if self.qat.get("enable", False):
+            # modelopt_mixed QAT has no exporter of its own; the rollout serves the
+            # ModelOpt checkpoint and needs requantized weights at every sync.
+            if (self.qat.get("mode") == "modelopt_mixed") != self.mixed_precision_export:
+                raise ValueError(
+                    "qat.mode=modelopt_mixed requires mixed_precision_export=True and vice versa, "
+                    f"got qat.mode={self.qat.get('mode')}, mixed_precision_export={self.mixed_precision_export}"
+                )
 
 
 @dataclass

@@ -1049,6 +1049,11 @@ class MegatronEngine(BaseEngine):
         comm-stubbed probe owns all shard geometry). Pure export, no side
         effects. Params owned by another pipeline stage yield an empty shard
         (zero-count lockstep rows; see the index builder)."""
+        if self.engine_config.mixed_precision_export:
+            raise NotImplementedError(
+                "mixed_precision_export requantizes only the full-tensor weight sync "
+                "(get_per_tensor_param); use checkpoint_engine.backend=naive"
+            )
         load_megatron_model_to_gpu(self.module, load_grad=False)
         index = self._mcore_export_index()
 

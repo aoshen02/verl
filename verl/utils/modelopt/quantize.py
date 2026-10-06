@@ -15,14 +15,16 @@
 
 """ModelOpt NVFP4 quantization config and application for Megatron QAT."""
 
+import contextlib
 import copy
 import fnmatch
+import inspect
 
 import modelopt.torch.quantization as mtq
 import torch
 import torch.nn as nn
-from modelopt.torch.quantization.nn import TensorQuantizer
 from modelopt.torch.quantization.config import _default_disabled_quantizer_cfg
+from modelopt.torch.quantization.nn import TensorQuantizer
 
 _NVFP4_W4A16_QUANTIZER_CFG = {
     "*weight_quantizer": {
@@ -116,34 +118,82 @@ class RequantSTEQuantizer(TensorQuantizer):
 
 
 def _te_grouped_weight_only_fn(package, func_name, self, *args):
-    """Weight-only replacement for ModelOpt's TE GroupedLinear functional.
+    """Weight-only quantized call of TE's ``_GroupedLinear`` functional.
 
     ModelOpt 0.44 reads the GEMM count from ``non_tensor_args[0]``, which is
-    ``apply_bias`` in TE 2.17; ``*weights_and_biases`` (2 * num_gemms tensors)
-    still trails the arguments.
+    ``apply_bias`` in TE 2.17; the weights are located by parameter name instead.
     """
-    num_gemms = self.num_gemms
-    weights_start = len(args) - 2 * num_gemms
+    import transformer_engine.pytorch.module.grouped_linear as te_grouped_linear
+
+    # Under ModelOpt's replace_function the original forward is cached at ``_forward``;
+    # the ``_forward`` call carries the placeholder ctx, ``_apply`` does not.
+    fn = te_grouped_linear._GroupedLinear
+    params = list(inspect.signature(getattr(fn, "_forward", fn.forward)).parameters)
+    weights_start = params.index("weights_and_biases") - (0 if func_name == "_forward" else 1)
     new_args = list(args)
-    for i in range(weights_start, weights_start + num_gemms):
-        new_args[i] = self.weight_quantizer(args[i])
+    for i in range(self.num_gemms):
+        weight = args[weights_start + i]
+        if not isinstance(weight, torch.Tensor) or weight.shape != getattr(self, f"weight{i}").shape:
+            raise RuntimeError(f"TE _GroupedLinear argument {weights_start + i} is not weight{i}")
+        new_args[weights_start + i] = self.weight_quantizer(weight)
     return getattr(package, func_name)(*new_args)
+
+
+@contextlib.contextmanager
+def _weight_only_grouped_linear_quant_modules():
+    """Quantize Megatron's TE grouped linears with verl's weight-only subclasses.
+
+    Registers verl subclasses of ModelOpt's quant modules in ModelOpt's
+    QuantModuleRegistry for the duration of one ``mtq.quantize`` and restores
+    ModelOpt's own registrations afterwards.
+    """
+    from megatron.core.extensions.transformer_engine import TEColumnParallelGroupedLinear, TERowParallelGroupedLinear
+    from modelopt.torch.quantization.plugins.megatron import (
+        _MegatronTEGroupedColumnParallelLinear,
+        _MegatronTEGroupedRowParallelLinear,
+    )
+
+    class _WeightOnlyColumnGroupedLinear(_MegatronTEGroupedColumnParallelLinear):
+        _quantized_linear_fn = staticmethod(_te_grouped_weight_only_fn)
+
+    class _WeightOnlyRowGroupedLinear(_MegatronTEGroupedRowParallelLinear):
+        _quantized_linear_fn = staticmethod(_te_grouped_weight_only_fn)
+
+    registry = mtq.QuantModuleRegistry
+    swaps = [
+        (TEColumnParallelGroupedLinear, _MegatronTEGroupedColumnParallelLinear, _WeightOnlyColumnGroupedLinear),
+        (TERowParallelGroupedLinear, _MegatronTEGroupedRowParallelLinear, _WeightOnlyRowGroupedLinear),
+    ]
+    keys = [registry.get_key(nn_cls) for nn_cls, _, _ in swaps]
+    for (nn_cls, _, verl_cls), key in zip(swaps, keys, strict=True):
+        registry.unregister(nn_cls)
+        registry.register({nn_cls: key})(verl_cls)
+    try:
+        yield tuple(verl_cls for _, _, verl_cls in swaps)
+    finally:
+        for (nn_cls, modelopt_cls, _), key in zip(swaps, keys, strict=True):
+            registry.unregister(nn_cls)
+            registry.register({nn_cls: key})(modelopt_cls)
 
 
 def apply_mixed_precision_qat(model: nn.Module) -> nn.Module:
     """Insert deployment-matching weight fake-quant on the quantized deployment layers."""
     from modelopt.torch.quantization.plugins.transformer_engine import _QuantTEGroupedLinear
 
-    _QuantTEGroupedLinear._quantized_linear_fn = staticmethod(_te_grouped_weight_only_fn)
+    # Every enabled weight quantizer is replaced by RequantSTEQuantizer below; the
+    # cfg only makes mtq.quantize create it.
     quant_cfg = [{"quantizer_name": "*", "enable": False}]
     for name in _MIXED_PRECISION_WEIGHT_QUANTIZERS:
         quant_cfg.append({"quantizer_name": name, "cfg": {"num_bits": (4, 3), "axis": None}, "enable": True})
-    mtq.quantize(model, {"quant_cfg": quant_cfg, "algorithm": None})
+    with _weight_only_grouped_linear_quant_modules() as weight_only_grouped_classes:
+        mtq.quantize(model, {"quant_cfg": quant_cfg, "algorithm": None})
     replaced = 0
     for module_name, module in model.named_modules():
         quantizer = getattr(module, "weight_quantizer", None)
         if not isinstance(quantizer, TensorQuantizer) or not quantizer.is_enabled:
             continue
+        if isinstance(module, _QuantTEGroupedLinear) and not isinstance(module, weight_only_grouped_classes):
+            raise RuntimeError(f"{module_name}: {type(module).__name__} has no weight-only grouped quant module")
         name = f"{module_name}.weight_quantizer"
         algorithm = next(a for p, a in _MIXED_PRECISION_WEIGHT_QUANTIZERS.items() if fnmatch.fnmatch(name, p))
         module.weight_quantizer = RequantSTEQuantizer(algorithm).to(next(module.parameters()).device)

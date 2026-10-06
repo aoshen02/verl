@@ -22,6 +22,7 @@ from verl.utils.megatron_utils import unwrap_model
 
 from .util import (
     build_vlm_attn_mask_bshd,
+    has_mamba_layers,
     postprocess_bshd_engine,
     postprocess_thd_engine,
     preprocess_bshd_engine,
@@ -165,7 +166,7 @@ def gptmodel_forward_model_engine(
         input_ids_rmpad, packed_seq_params, position_ids_rmpad = preprocess_thd_engine(
             input_ids,
             pre_process=True,
-            mamba_seq_idx="M" in (getattr(unwrap_model(model), "hybrid_layer_pattern", None) or ""),
+            mamba_seq_idx=has_mamba_layers(unwrap_model(model)),
             **thd_kwargs,
         )
         if vision_model:
