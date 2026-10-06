@@ -383,8 +383,11 @@ class DataProto:
             )
         else:
             if version.parse(tensordict.__version__) >= version.parse("0.5.0") and self.batch is not None:
-                # Check if batch is empty to avoid torch.cat error in consolidate
-                if len(self.batch.keys()) > 0:
+                # Check if batch is empty to avoid torch.cat error in consolidate.
+                # A consolidated and locked batch (see AgentLoopWorker.generate_sequences) is saved as is.
+                # An unpickled batch keeps the consolidated flag but is unlocked and may have been edited.
+                fresh = self.batch.is_consolidated() and self.batch.is_locked
+                if len(self.batch.keys()) > 0 and not fresh:
                     batch = self.batch.contiguous().consolidate()
                 else:
                     batch = self.batch

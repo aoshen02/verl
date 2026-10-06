@@ -32,6 +32,7 @@ from verl.experimental.agent_loop.agent_loop import (
     _InternalAgentLoopOutput,
 )
 from verl.experimental.agent_loop.single_turn_agent_loop import SingleTurnAgentLoop
+from verl.protocol import DataProto
 from verl.utils.dataset.rl_dataset import RLHFDataset
 from verl.workers.rollout.replica import TokenOutput
 
@@ -402,6 +403,47 @@ async def test_agent_loop_extra_fields_schema_stable_for_training_concat_on_cpu(
     # And the list-typed fields are actually lists (not missing / scalar).
     assert merged.non_tensor_batch["turn_scores"][0] == []
     assert merged.non_tensor_batch["tool_rewards"][0] == []
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_worker_returns_consolidated_batch_on_cpu(monkeypatch):
+    """Ray pickles the return value off the event loop thread; it must not need a batch-sized copy there."""
+    monkeypatch.delenv("VERL_DATAPROTO_SERIALIZATION_METHOD", raising=False)
+    worker = object.__new__(AgentLoopWorker)
+    worker.rollout_config = OmegaConf.create(
+        {
+            "temperature": 1.0,
+            "top_p": 1.0,
+            "top_k": -1,
+            "calculate_log_probs": False,
+            "agent": {"default_agent_loop": "single_turn_agent"},
+        }
+    )
+    worker.reward_loop_worker_handles = None
+    worker.distillation_enabled = False
+
+    async def fake_run_agent_loop(sampling_params, trajectory, *, agent_name, trace=True, **kwargs):
+        del sampling_params, agent_name, trace, kwargs
+        i = trajectory["sample_index"]
+        return _to_internal(
+            output_prompt_ids=[101, 102 + i],
+            output_response_ids=[11, 12, 13],
+            output_response_mask=[1, 1, 1],
+            metrics=AgentLoopMetrics(),
+            extra_fields={},
+            num_turns=2,
+            prompt_len=4,
+            response_len=4,
+        )
+
+    worker._run_agent_loop = fake_run_agent_loop
+    raw_prompt = np.empty(2, dtype=object)
+    raw_prompt[:] = [[{"role": "user", "content": "hi"}]] * 2
+    batch = DataProto(non_tensor_batch={"raw_prompt": raw_prompt})
+
+    output = await worker.generate_sequences(batch)
+
+    assert output.batch.is_consolidated() and output.batch.is_locked
 
 
 @pytest.mark.asyncio

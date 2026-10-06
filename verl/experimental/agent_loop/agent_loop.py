@@ -673,6 +673,11 @@ class AgentLoopWorker:
         output = self._postprocess(
             outputs, input_non_tensor_batch=batch.non_tensor_batch, validate=batch.meta_info.get("validate", False)
         )
+        # Ray serializes the result off the event loop thread. Consolidate here so DataProto.__getstate__
+        # does not allocate a batch-sized tensor on that thread (RSS growth with the mimalloc allocator).
+        # Lock it so it cannot be edited before serialization (tensordict<0.10 does not lock on consolidate).
+        if os.getenv("VERL_DATAPROTO_SERIALIZATION_METHOD") != "numpy":
+            output.batch = output.batch.contiguous().consolidate().lock_()
         return output
 
     async def _run_agent_loop(
