@@ -14,7 +14,9 @@
 # checkpoint's activations: release (default) as stored, FP8 W8A8 Mamba in/out_proj
 # and FP8 query and KV cache; bf16 keeps them BF16: W8A16 Mamba in/out_proj (the
 # FP8 weights dequantized) and a BF16 KV cache. The NVFP4 routed experts are
-# W4A16 in both; the checkpoint is used as released.
+# W4A16 in both; the checkpoint is used as released. ACTOR_ROUTER_REPLAY (BI=1)
+# is R2 by default: the actor's old-log-prob forward records each MoE router's
+# experts and every PPO update of the step replays them; disabled recomputes them.
 # Modes: quick_alignment_test (1x4, short workload, three steps), aligned.
 # Hardware: gb200 (1x4, PP1/EP4 actor, rollout DP4/EP4).
 # Image builds on `Dockerfile.nemotron_h_true_on_policy`, which installs vLLM,
@@ -24,8 +26,8 @@ set -euo pipefail
 # Required env: MODEL_PATH, BF16_MASTER_PATH, TRAIN_FILES, VAL_FILES.
 # Optional env: VLLM_BATCH_INVARIANT, training steps, batch size, lengths, output
 # paths, WANDB_API_KEY, WANDB_ENTITY, WANDB_MODE, WANDB_BASE_URL, and Hydra
-# overrides; with VLLM_BATCH_INVARIANT=1 also ACTIVATION_PRECISION, with
-# VLLM_BATCH_INVARIANT=0 also ACTOR_PRECISION.
+# overrides; with VLLM_BATCH_INVARIANT=1 also ACTIVATION_PRECISION and
+# ACTOR_ROUTER_REPLAY, with VLLM_BATCH_INVARIANT=0 also ACTOR_PRECISION.
 SEED="${SEED:-42}"
 ACTOR_LR="${ACTOR_LR:-1e-6}"
 MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-2048}"
@@ -176,15 +178,24 @@ if [[ "${VLLM_BATCH_INVARIANT}" == 1 ]]; then
       ;;
     *) die "ACTIVATION_PRECISION must be release or bf16, got '${ACTIVATION_PRECISION}'" ;;
   esac
+  : "${ACTOR_ROUTER_REPLAY:=R2}"
+  case "${ACTOR_ROUTER_REPLAY}" in
+    # The actor records routes only without pipeline parallelism.
+    R2) [[ "${ACTOR_PP}" == 1 ]] || die "ACTOR_ROUTER_REPLAY=R2 requires ACTOR_PP=1" ;;
+    disabled) ;;
+    *) die "ACTOR_ROUTER_REPLAY must be R2 or disabled, got '${ACTOR_ROUTER_REPLAY}'" ;;
+  esac
   ARM=
   PROJECT_NAME="${PROJECT_NAME:-verl-nemotron-h-true-on-policy}"
   ARM_ENV_NAMES=()
   ACTOR_SUMMARY="OPTIMIZER=${ACTOR_OPTIMIZER} ACTIVATIONS=${ACTIVATION_PRECISION}"
+  ACTOR_SUMMARY+=" ROUTING_REPLAY=${ACTOR_ROUTER_REPLAY}"
   MODE_ARGS=(
     actor_rollout_ref.actor.engine.impl=vllm
     +actor_rollout_ref.actor.engine.seed="${SEED}"
     +actor_rollout_ref.actor.engine.full_determinism=True
     actor_rollout_ref.actor.engine.attention_backend_override=null
+    actor_rollout_ref.actor.engine.router_replay_mode="${ACTOR_ROUTER_REPLAY}"
     # True gives the n samples of a prompt one vLLM seed; batch invariance, not
     # full determinism, makes rollout and actor agree.
     actor_rollout_ref.rollout.full_determinism=False
