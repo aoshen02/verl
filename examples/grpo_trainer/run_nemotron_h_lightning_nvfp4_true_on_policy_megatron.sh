@@ -20,7 +20,7 @@
 # TASK chooses the workload: math (default, DAPO-format parquet, single turn) or
 # swe_bench_pro (uni-agent ReAct agent in E2B sandboxes, uni-agent-format parquet).
 # swe_bench_pro is strictly on-policy (one update per step: mini batch = train
-# batch, no routing replay at BI=1) with a 48K agent context; E2B credentials
+# batch, no routing replay at BI=1) with a 32K agent context; E2B credentials
 # come from the environment of every Ray node, never through Hydra.
 # Modes: quick_alignment_test (1x4, short workload, three steps), aligned.
 # Hardware: gb200 (1x4, PP1/EP4 actor, rollout DP4/EP4).
@@ -103,7 +103,7 @@ case "${TASK}" in
       || die "TASK=swe_bench_pro updates once per step: PPO_MINI_BATCH_SIZE must equal TRAIN_BATCH_SIZE"
     : "${ROLLOUT_N:=8}"
     : "${MAX_PROMPT_LENGTH:=8192}"
-    : "${MAX_RESPONSE_LENGTH:=40960}"
+    : "${MAX_RESPONSE_LENGTH:=24576}"
     # One micro-batch holds a whole trajectory.
     : "${PPO_MAX_TOKEN_LEN_PER_GPU:=$((MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH))}"
     # Fixed split-KV FA4 scratch grows with the prefill chunk; 8192 leaves the
