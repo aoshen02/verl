@@ -157,23 +157,18 @@ if [[ "${VLLM_BATCH_INVARIANT}" == 1 ]]; then
     *) die "ACTOR_OPTIMIZER must be dist_opt or fsdp2, got '${ACTOR_OPTIMIZER}'" ;;
   esac
   : "${ACTIVATION_PRECISION:=release}"
-  # PLACEHOLDER: the Hydra override that turns on vLLM's BF16-activation mode
-  # (FP8 Mamba in/out_proj dequantized at load, served W8A16), e.g.
-  # +actor_rollout_ref.rollout.engine_kwargs.vllm.<knob>=<value>. Until it is
-  # filled in here, ACTIVATION_PRECISION=bf16 requires it from the environment.
-  : "${VLLM_BF16_ACTIVATION_OVERRIDE:=}"
   case "${ACTIVATION_PRECISION}" in
     release)
       ROLLOUT_KV_CACHE_DTYPE=fp8_e4m3
       ACTIVATION_ARGS=()
       ;;
     bf16)
-      [[ -n "${VLLM_BF16_ACTIVATION_OVERRIDE}" ]] \
-        || die "ACTIVATION_PRECISION=bf16 requires VLLM_BF16_ACTIVATION_OVERRIDE"
+      # vLLM serves the FP8 Mamba in/out_proj as W8A16 (weights dequantized
+      # at load) and the KV cache in BF16; the actor mirrors both.
       ROLLOUT_KV_CACHE_DTYPE=bfloat16
       ACTIVATION_ARGS=(
         +actor_rollout_ref.actor.engine.impl_cfg.activation_precision=bf16
-        "${VLLM_BF16_ACTIVATION_OVERRIDE}"
+        +actor_rollout_ref.rollout.engine_kwargs.vllm.hf_overrides.bf16_activations=true
       )
       ;;
     *) die "ACTIVATION_PRECISION must be release or bf16, got '${ACTIVATION_PRECISION}'" ;;
