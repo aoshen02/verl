@@ -20,7 +20,7 @@
 # TASK chooses the workload: math (default, DAPO-format parquet, single turn) or
 # swe_bench_pro (uni-agent ReAct agent in E2B sandboxes, uni-agent-format parquet).
 # swe_bench_pro is strictly on-policy (one update per step: mini batch = train
-# batch, no routing replay at BI=1) with a 64K agent context; E2B credentials
+# batch, no routing replay at BI=1) with a 48K agent context; E2B credentials
 # come from the environment of every Ray node, never through Hydra.
 # Modes: quick_alignment_test (1x4, short workload, three steps), aligned.
 # Hardware: gb200 (1x4, PP1/EP4 actor, rollout DP4/EP4).
@@ -103,19 +103,23 @@ case "${TASK}" in
       || die "TASK=swe_bench_pro updates once per step: PPO_MINI_BATCH_SIZE must equal TRAIN_BATCH_SIZE"
     : "${ROLLOUT_N:=8}"
     : "${MAX_PROMPT_LENGTH:=8192}"
-    : "${MAX_RESPONSE_LENGTH:=57344}"
+    : "${MAX_RESPONSE_LENGTH:=40960}"
     # One micro-batch holds a whole trajectory.
     : "${PPO_MAX_TOKEN_LEN_PER_GPU:=$((MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH))}"
     # Fixed split-KV FA4 scratch grows with the prefill chunk; 8192 leaves the
     # BI=1 rollout room next to the resident actor state.
     : "${ROLLOUT_MAX_NUM_BATCHED_TOKENS:=8192}"
     : "${ACTOR_ROUTER_REPLAY:=disabled}"
+    # The E2B provider waits for sandbox capacity (E2B_CAPACITY_WAIT, 1800 s)
+    # inside start(); the generic startup cap must not cut that wait short.
+    export SANDBOX_STARTUP_TIMEOUT="${SANDBOX_STARTUP_TIMEOUT:-2400}"
     : "${SAVE_FREQ:=5}"
     : "${TEST_FREQ:=-1}"
     AF=actor_rollout_ref.rollout.custom.agent_framework
     TASK_ARGS=(
       trainer.use_v1=True
       trainer.v1.trainer_mode=sync
+      actor_rollout_ref.actor.ppo_epochs=1
       transfer_queue.enable=True
       data.prompt_key=prompt
       data.return_raw_chat=True
@@ -133,6 +137,10 @@ case "${TASK}" in
       "++${AF}.agent_runners.task.trajectory_selection=longest"
       "++${AF}.agent_runners.task.runner_kwargs.task_config_path=${UNI_AGENT_TASK_CONFIG}"
       "++${AF}.mask_unfinished_episode=False"
+      # The gateway rolls a rewritten last assistant back on its own token buffer.
+      "++${AF}.enable_last_assistant_rollback=True"
+      # Fail the step instead of training on a batch that lost prompts to sandbox errors.
+      "++${AF}.max_failed_prompt_fraction=${UNI_AGENT_MAX_FAILED_PROMPT_FRACTION:-0.25}"
       reward.custom_reward_function.path=pkg://uni_agent.framework.task_runner
       reward.custom_reward_function.name=score_from_runner_result
       reward.reward_kwargs.overlong_buffer_cfg.enable=False
