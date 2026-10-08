@@ -17,6 +17,11 @@
 # W4A16 in both; the checkpoint is used as released. ACTOR_ROUTER_REPLAY (BI=1)
 # is R2 by default: the actor's old-log-prob forward records each MoE router's
 # experts and every PPO update of the step replays them; disabled recomputes them.
+# TASK chooses the workload: math (default, DAPO-format parquet, single turn) or
+# swe_bench_pro (uni-agent ReAct agent in E2B sandboxes, uni-agent-format parquet).
+# swe_bench_pro is strictly on-policy (one update per step: mini batch = train
+# batch, no routing replay at BI=1) with a 64K agent context; E2B credentials
+# come from the environment of every Ray node, never through Hydra.
 # Modes: quick_alignment_test (1x4, short workload, three steps), aligned.
 # Hardware: gb200 (1x4, PP1/EP4 actor, rollout DP4/EP4).
 # Image builds on `Dockerfile.nemotron_h_true_on_policy`, which installs vLLM,
@@ -27,10 +32,10 @@ set -euo pipefail
 # Optional env: VLLM_BATCH_INVARIANT, training steps, batch size, lengths, output
 # paths, WANDB_API_KEY, WANDB_ENTITY, WANDB_MODE, WANDB_BASE_URL, and Hydra
 # overrides; with VLLM_BATCH_INVARIANT=1 also ACTIVATION_PRECISION and
-# ACTOR_ROUTER_REPLAY, with VLLM_BATCH_INVARIANT=0 also ACTOR_PRECISION.
+# ACTOR_ROUTER_REPLAY, with VLLM_BATCH_INVARIANT=0 also ACTOR_PRECISION; with
+# TASK=swe_bench_pro also UNI_AGENT_TASK_CONFIG (required) and UNI_AGENT_CONCURRENCY.
 SEED="${SEED:-42}"
 ACTOR_LR="${ACTOR_LR:-1e-6}"
-MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-2048}"
 
 usage() {
   echo "usage: $0 --hardware gb200 --mode {quick_alignment_test|aligned} [Hydra overrides...]"
@@ -82,6 +87,59 @@ done
 : "${BF16_MASTER_PATH:?set BF16_MASTER_PATH to the Nemotron-H Lightning BF16 release}"
 : "${TRAIN_FILES:?set TRAIN_FILES to DAPO-format training parquet}"
 : "${VAL_FILES:?set VAL_FILES to DAPO-format validation parquet}"
+
+# --- Task presets ---
+TASK="${TASK:-math}"
+case "${TASK}" in
+  math)
+    : "${MAX_PROMPT_LENGTH:=2048}"
+    TASK_ARGS=(trainer.use_v1=False)
+    ;;
+  swe_bench_pro)
+    : "${UNI_AGENT_TASK_CONFIG:?set UNI_AGENT_TASK_CONFIG to the uni-agent Task Config YAML}"
+    : "${TRAIN_BATCH_SIZE:=32}"
+    : "${PPO_MINI_BATCH_SIZE:=${TRAIN_BATCH_SIZE}}"
+    [[ "${PPO_MINI_BATCH_SIZE}" == "${TRAIN_BATCH_SIZE}" ]] \
+      || die "TASK=swe_bench_pro updates once per step: PPO_MINI_BATCH_SIZE must equal TRAIN_BATCH_SIZE"
+    : "${ROLLOUT_N:=8}"
+    : "${MAX_PROMPT_LENGTH:=8192}"
+    : "${MAX_RESPONSE_LENGTH:=57344}"
+    # One micro-batch holds a whole trajectory.
+    : "${PPO_MAX_TOKEN_LEN_PER_GPU:=$((MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH))}"
+    # Fixed split-KV FA4 scratch grows with the prefill chunk; 8192 leaves the
+    # BI=1 rollout room next to the resident actor state.
+    : "${ROLLOUT_MAX_NUM_BATCHED_TOKENS:=8192}"
+    : "${ACTOR_ROUTER_REPLAY:=disabled}"
+    : "${SAVE_FREQ:=5}"
+    : "${TEST_FREQ:=-1}"
+    AF=actor_rollout_ref.rollout.custom.agent_framework
+    TASK_ARGS=(
+      trainer.use_v1=True
+      trainer.v1.trainer_mode=sync
+      transfer_queue.enable=True
+      data.prompt_key=prompt
+      data.return_raw_chat=True
+      data.filter_overlong_prompts=True
+      data.truncation=error
+      actor_rollout_ref.rollout.multi_turn.enable=True
+      actor_rollout_ref.rollout.multi_turn.max_parallel_calls=1
+      ++actor_rollout_ref.rollout.multi_turn.format=qwen3_coder
+      ++actor_rollout_ref.rollout.agent.agent_loop_manager_class=uni_agent.framework.entry.AgentFrameworkRolloutAdapter
+      "++${AF}.gateway_count=8"
+      "++${AF}.allowed_request_sampling_param_keys=[temperature,top_p,top_k]"
+      "++${AF}.agent_runners.task.runner_fqn=uni_agent.framework.task_runner.run_task"
+      "++${AF}.agent_runners.task.dispatch_mode=ray_task"
+      "++${AF}.agent_runners.task.max_concurrent_sessions=${UNI_AGENT_CONCURRENCY:-512}"
+      "++${AF}.agent_runners.task.trajectory_selection=longest"
+      "++${AF}.agent_runners.task.runner_kwargs.task_config_path=${UNI_AGENT_TASK_CONFIG}"
+      "++${AF}.mask_unfinished_episode=False"
+      reward.custom_reward_function.path=pkg://uni_agent.framework.task_runner
+      reward.custom_reward_function.name=score_from_runner_result
+      reward.reward_kwargs.overlong_buffer_cfg.enable=False
+    )
+    ;;
+  *) die "TASK must be math or swe_bench_pro, got '${TASK}'" ;;
+esac
 
 # --- Mode presets ---
 # quick_alignment_test keeps the full model (the actor requires the complete
@@ -310,6 +368,9 @@ RUN_NAME="${RUN_NAME:-nemotron_h_${HARDWARE}_${MODE}${ARM}}"
 CKPT_DIR="${CKPT_DIR:-${OUTPUT_ROOT}/checkpoints/${RUN_NAME}}"
 LOG_FILE="${LOG_FILE:-${OUTPUT_ROOT}/${RUN_NAME}.log}"
 JSONL_FILE="${JSONL_FILE:-${OUTPUT_ROOT}/${RUN_NAME}.jsonl}"
+if [[ "${TASK}" == swe_bench_pro ]]; then
+  TASK_ARGS+=("++${AF}.log_dir=${OUTPUT_ROOT}/agent_logs")
+fi
 if [[ "${DRY_RUN:-0}" != 1 && "${NNODES}" -gt 1 ]]; then
   : "${RAY_ADDRESS:?multi-node modes require an existing Ray cluster}"
 fi
@@ -430,7 +491,6 @@ HYDRA_ARGS=(
   trainer.max_actor_ckpt_to_keep=2
   trainer.default_local_dir="${CKPT_DIR}"
   trainer.val_before_train=False
-  trainer.use_v1=False
 )
 
 # --- Launch ---
@@ -442,6 +502,7 @@ COMMAND=(
   "${OPTIMIZER_ARGS[@]}"
   "${MODE_ARGS[@]}"
   "${ACTIVATION_ARGS[@]}"
+  "${TASK_ARGS[@]}"
   "${RAY_RUNTIME_ENV[@]}"
   "${HYDRA_OVERRIDES[@]}"
 )
