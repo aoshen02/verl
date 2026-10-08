@@ -10,6 +10,11 @@
 # weights); ACTOR_PRECISION=bf16 trains on the BF16 masters as they are. Like the
 # baseline-r3 recipe, it logs to W&B project verl-nemotron-h-baseline-r3 and
 # forwards NCCL_CUMEM_ENABLE to an existing Ray cluster when set.
+# ACTIVATION_PRECISION (BI=1) chooses how actor and rollout serve the release
+# checkpoint's activations: release (default) as stored, FP8 W8A8 Mamba in/out_proj
+# and FP8 query and KV cache; bf16 keeps them BF16: W8A16 Mamba in/out_proj (the
+# FP8 weights dequantized) and a BF16 KV cache. The NVFP4 routed experts are
+# W4A16 in both; the checkpoint is used as released.
 # Modes: quick_alignment_test (1x4, short workload, three steps), aligned.
 # Hardware: gb200 (1x4, PP1/EP4 actor, rollout DP4/EP4).
 # Image builds on `Dockerfile.nemotron_h_true_on_policy`, which installs vLLM,
@@ -19,7 +24,8 @@ set -euo pipefail
 # Required env: MODEL_PATH, BF16_MASTER_PATH, TRAIN_FILES, VAL_FILES.
 # Optional env: VLLM_BATCH_INVARIANT, training steps, batch size, lengths, output
 # paths, WANDB_API_KEY, WANDB_ENTITY, WANDB_MODE, WANDB_BASE_URL, and Hydra
-# overrides; with VLLM_BATCH_INVARIANT=0 also ACTOR_PRECISION.
+# overrides; with VLLM_BATCH_INVARIANT=1 also ACTIVATION_PRECISION, with
+# VLLM_BATCH_INVARIANT=0 also ACTOR_PRECISION.
 SEED="${SEED:-42}"
 ACTOR_LR="${ACTOR_LR:-1e-6}"
 MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-2048}"
@@ -148,10 +154,32 @@ if [[ "${VLLM_BATCH_INVARIANT}" == 1 ]]; then
     dist_opt) : "${ROLLOUT_GPU_MEMORY_UTILIZATION:=0.55}" ;;
     *) die "ACTOR_OPTIMIZER must be dist_opt or fsdp2, got '${ACTOR_OPTIMIZER}'" ;;
   esac
+  : "${ACTIVATION_PRECISION:=release}"
+  # PLACEHOLDER: the Hydra override that turns on vLLM's BF16-activation mode
+  # (FP8 Mamba in/out_proj dequantized at load, served W8A16), e.g.
+  # +actor_rollout_ref.rollout.engine_kwargs.vllm.<knob>=<value>. Until it is
+  # filled in here, ACTIVATION_PRECISION=bf16 requires it from the environment.
+  : "${VLLM_BF16_ACTIVATION_OVERRIDE:=}"
+  case "${ACTIVATION_PRECISION}" in
+    release)
+      ROLLOUT_KV_CACHE_DTYPE=fp8_e4m3
+      ACTIVATION_ARGS=()
+      ;;
+    bf16)
+      [[ -n "${VLLM_BF16_ACTIVATION_OVERRIDE}" ]] \
+        || die "ACTIVATION_PRECISION=bf16 requires VLLM_BF16_ACTIVATION_OVERRIDE"
+      ROLLOUT_KV_CACHE_DTYPE=bfloat16
+      ACTIVATION_ARGS=(
+        +actor_rollout_ref.actor.engine.impl_cfg.activation_precision=bf16
+        "${VLLM_BF16_ACTIVATION_OVERRIDE}"
+      )
+      ;;
+    *) die "ACTIVATION_PRECISION must be release or bf16, got '${ACTIVATION_PRECISION}'" ;;
+  esac
   ARM=
   PROJECT_NAME="${PROJECT_NAME:-verl-nemotron-h-true-on-policy}"
   ARM_ENV_NAMES=()
-  ACTOR_SUMMARY="OPTIMIZER=${ACTOR_OPTIMIZER}"
+  ACTOR_SUMMARY="OPTIMIZER=${ACTOR_OPTIMIZER} ACTIVATIONS=${ACTIVATION_PRECISION}"
   MODE_ARGS=(
     actor_rollout_ref.actor.engine.impl=vllm
     +actor_rollout_ref.actor.engine.seed="${SEED}"
@@ -199,6 +227,10 @@ elif [[ "${VLLM_BATCH_INVARIANT}" == 0 ]]; then
   # weights (STE to the BF16 masters); bf16 trains on the masters as they are.
   : "${ACTOR_PRECISION:=qat}"
   : "${ROLLOUT_GPU_MEMORY_UTILIZATION:=0.45}"
+  [[ "${ACTIVATION_PRECISION:-release}" == release ]] \
+    || die "ACTIVATION_PRECISION applies to VLLM_BATCH_INVARIANT=1; BI=0 uses ACTOR_PRECISION"
+  ROLLOUT_KV_CACHE_DTYPE=fp8_e4m3
+  ACTIVATION_ARGS=()
   # Packed Mamba sequences need their per-sequence seq_idx, which needs CP=1.
   [[ "${ACTOR_CP}" == 1 ]] || die "VLLM_BATCH_INVARIANT=0 requires ACTOR_CP=1, got '${ACTOR_CP}'"
   ARM=_bi0
@@ -372,7 +404,7 @@ HYDRA_ARGS=(
   "${PREFIX_CACHING_ARGS[@]}"
   actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=1024
   +actor_rollout_ref.rollout.engine_kwargs.vllm.worker_extension_cls="${VLLM_WORKER_EXTENSION}"
-  +actor_rollout_ref.rollout.engine_kwargs.vllm.kv_cache_dtype=fp8_e4m3
+  +actor_rollout_ref.rollout.engine_kwargs.vllm.kv_cache_dtype="${ROLLOUT_KV_CACHE_DTYPE}"
   +actor_rollout_ref.rollout.engine_kwargs.vllm.moe_backend="${ROLLOUT_MOE_BACKEND}"
   # Reward and trainer.
   reward.reward_manager.name=dapo
@@ -403,6 +435,7 @@ COMMAND=(
   "${ACTOR_ARGS[@]}"
   "${OPTIMIZER_ARGS[@]}"
   "${MODE_ARGS[@]}"
+  "${ACTIVATION_ARGS[@]}"
   "${RAY_RUNTIME_ENV[@]}"
   "${HYDRA_OVERRIDES[@]}"
 )
