@@ -115,8 +115,9 @@ case "${TASK}" in
     : "${ROLLOUT_N:=8}"
     : "${MAX_PROMPT_LENGTH:=8192}"
     : "${MAX_RESPONSE_LENGTH:=24576}"
-    # One micro-batch holds a whole trajectory.
-    : "${PPO_MAX_TOKEN_LEN_PER_GPU:=$((MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH))}"
+    # One micro-batch holds a whole trajectory; verl packs up to this times
+    # the actor's CP size, which splits the pack over the CP ranks.
+    : "${PPO_MAX_TOKEN_LEN_PER_GPU:=$(( (MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH + ${ACTOR_CP:-1} - 1) / ${ACTOR_CP:-1} ))}"
     # Fixed split-KV FA4 scratch grows with the prefill chunk; 8192 leaves the
     # BI=1 rollout room next to the resident actor state.
     : "${ROLLOUT_MAX_NUM_BATCHED_TOKENS:=8192}"
@@ -238,10 +239,15 @@ MAX_MODEL_LEN=$((MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH))
 # Routed-experts capture (R3) needs Model Runner V2 as well.
 export VLLM_USE_V2_MODEL_RUNNER=1
 if [[ "${VLLM_BATCH_INVARIANT}" == 1 ]]; then
-  # The aligned actor's Mamba replay and attention do not handle a context-split
-  # sequence yet; refuse CP>1 instead of training on wrong log-probs.
-  [[ "${ACTOR_CP}" == 1 ]] \
-    || die "ACTOR_CP=${ACTOR_CP}: the VLLM_BATCH_INVARIANT=1 actor supports ACTOR_CP=1 only"
+  # ACTOR_CP splits each packed micro-batch contiguously over the EP ranks:
+  # attention gathers K/V and Mamba runs head-parallel, so log-probs are the
+  # CP=1 ones bitwise. CP must divide the 8 Mamba groups and ACTOR_EP.
+  case "${ACTOR_CP}" in
+    1) ;;
+    2|4) [[ "${ACTOR_PP}" == 1 && "${ACTOR_EP}" == 4 ]] \
+      || die "ACTOR_CP=${ACTOR_CP} requires ACTOR_PP=1 ACTOR_EP=4" ;;
+    *) die "ACTOR_CP must be 1, 2 or 4 with VLLM_BATCH_INVARIANT=1, got '${ACTOR_CP}'" ;;
+  esac
   : "${ACTOR_OPTIMIZER:=fsdp2}"
   case "${ACTOR_OPTIMIZER}" in
     # The actor's training state stays on the GPU during rollout; larger values
@@ -278,7 +284,7 @@ if [[ "${VLLM_BATCH_INVARIANT}" == 1 ]]; then
   PROJECT_NAME="${PROJECT_NAME:-verl-nemotron-h-true-on-policy}"
   ARM_ENV_NAMES=()
   ACTOR_SUMMARY="OPTIMIZER=${ACTOR_OPTIMIZER} ACTIVATIONS=${ACTIVATION_PRECISION}"
-  ACTOR_SUMMARY+=" ROUTING_REPLAY=${ACTOR_ROUTER_REPLAY}"
+  ACTOR_SUMMARY+=" ROUTING_REPLAY=${ACTOR_ROUTER_REPLAY} CP=${ACTOR_CP}"
   # ACTOR_PP_MAX_IN_FLIGHT=c caps the micro-batches a PP stage holds activations
   # for at c + 1 (empty: plain 1F1B, stage r holds pp - r); gradients are
   # bitwise identical. SWE trajectories reach 128K tokens, and at PP4 1F1B's
