@@ -568,11 +568,14 @@ class vLLMHttpServer:
         mm_processor_kwargs: Optional[dict[str, Any]] = None,
         priority: int = 0,
         kv_transfer_params: Optional[dict] = None,
+        data_parallel_rank: Optional[int] = None,
     ) -> TokenOutput:
         """Generate sequence with token-in-token-out.
 
         Args:
             kv_transfer_params: vLLM KV-transfer payload for PD requests.
+            data_parallel_rank: DP engine to serve the request; None lets
+                vLLM's DP load balancer choose.
         """
         if self._disaggregation_role == "prefill" and self._pd_decode_peers and kv_transfer_params is None:
             return await self._pd_dispatch(
@@ -688,6 +691,7 @@ class vLLMHttpServer:
                 request_id=request_id,
                 lora_request=lora_request,
                 priority=priority,
+                data_parallel_rank=data_parallel_rank,
             )
 
             # Get final response

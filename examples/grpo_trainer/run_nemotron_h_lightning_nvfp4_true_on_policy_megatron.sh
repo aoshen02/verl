@@ -28,6 +28,9 @@
 # colocated rollout: the v1 separate_async trainer at zero staleness (weights
 # synced over NCCL after every step, no warmup batch, stale groups dropped), so
 # training stays strictly on-policy. The Ray cluster then has 1+N nodes.
+# PIN_DP_RANK_BY_SESSION (swe_bench_pro, default True) sends every turn of an
+# agent session to one DP rank of its rollout replica (stable hash of the
+# session id), so multi-turn sessions keep their prefix cache.
 # Modes: quick_alignment_test (1x4, short workload, three steps), aligned.
 # Hardware: gb200 (1x4, PP1/EP4 actor, rollout DP4/EP4).
 # Image builds on `Dockerfile.nemotron_h_true_on_policy`, which installs vLLM,
@@ -42,7 +45,7 @@ set -euo pipefail
 # ACTOR_PRECISION and MTP (+MTP_SPEC_TOKENS, MTP_LR, MTP_LOSS_COEF,
 # MTP_SPEC_MOE_BACKEND); with
 # TASK=swe_bench_pro also UNI_AGENT_TASK_CONFIG (required), UNI_AGENT_CONCURRENCY,
-# ROLLOUT_NNODES and STANDALONE_GPU_MEMORY_UTILIZATION.
+# ROLLOUT_NNODES, STANDALONE_GPU_MEMORY_UTILIZATION and PIN_DP_RANK_BY_SESSION.
 SEED="${SEED:-42}"
 ACTOR_LR="${ACTOR_LR:-1e-6}"
 
@@ -135,6 +138,10 @@ case "${TASK}" in
     # rollout's log-probs (bypass mode). With one update per step actor/ppo_kl
     # then measures the rollout/actor mismatch, and entropy comes from the
     # update forward.
+    case "${PIN_DP_RANK_BY_SESSION:=True}" in
+      True|False) ;;
+      *) die "PIN_DP_RANK_BY_SESSION must be True or False, got '${PIN_DP_RANK_BY_SESSION}'" ;;
+    esac
     case "${OLD_LOG_PROB:=recompute}" in
       recompute) BYPASS_OLD_LOG_PROB=False ;;
       rollout) BYPASS_OLD_LOG_PROB=True ;;
@@ -152,6 +159,7 @@ case "${TASK}" in
       data.filter_overlong_prompts=True
       data.truncation=error
       actor_rollout_ref.rollout.multi_turn.enable=True
+      actor_rollout_ref.rollout.pin_dp_rank_by_session="${PIN_DP_RANK_BY_SESSION}"
       actor_rollout_ref.rollout.multi_turn.max_parallel_calls=1
       ++actor_rollout_ref.rollout.multi_turn.format=qwen3_coder
       ++actor_rollout_ref.rollout.agent.agent_loop_manager_class=uni_agent.framework.entry.AgentFrameworkRolloutAdapter
