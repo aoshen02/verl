@@ -39,7 +39,8 @@ set -euo pipefail
 # paths, WANDB_API_KEY, WANDB_ENTITY, WANDB_MODE, WANDB_BASE_URL, and Hydra
 # overrides; with VLLM_BATCH_INVARIANT=1 also ACTIVATION_PRECISION and
 # ACTOR_ROUTER_REPLAY and ACTOR_PP_MAX_IN_FLIGHT, with VLLM_BATCH_INVARIANT=0 also
-# ACTOR_PRECISION; with
+# ACTOR_PRECISION; at either setting ROLLOUT_SPEC_MTP (+ROLLOUT_SPEC_TOKENS,
+# ROLLOUT_SPEC_MOE_BACKEND); with
 # TASK=swe_bench_pro also UNI_AGENT_TASK_CONFIG (required), UNI_AGENT_CONCURRENCY,
 # ROLLOUT_NNODES and STANDALONE_GPU_MEMORY_UTILIZATION.
 SEED="${SEED:-42}"
@@ -434,6 +435,37 @@ else
 fi
 export VLLM_BATCH_INVARIANT
 
+# --- Optional MTP speculative decoding in the rollout (default off) ---
+# The checkpoint's MTP head drafts ROLLOUT_SPEC_TOKENS tokens per step; rejection
+# sampling keeps the target distribution and the returned logprobs are the
+# target's (at BI=1 bitwise those of non-speculative decoding: Mamba2 exact
+# replay rejects drafts on SSD chunk ends). RL trains the backbone only, so the
+# MTP block keeps its checkpoint weights while sharing the target's embedding
+# and LM head, which every refit updates.
+: "${ROLLOUT_SPEC_MTP:=0}"
+SPEC_ARGS=()
+case "${ROLLOUT_SPEC_MTP}" in
+  0) ;;
+  1)
+    : "${ROLLOUT_SPEC_TOKENS:=1}"
+    # The MTP block is BF16, which the NVFP4-only CuTe-DSL MoE backend rejects;
+    # Triton's unquantized MoE rejects the one-sided NVLink all2all under EP.
+    : "${ROLLOUT_SPEC_MOE_BACKEND:=flashinfer_cutlass}"
+    SPEC_CONFIG="method:mtp,num_speculative_tokens:${ROLLOUT_SPEC_TOKENS}"
+    SPEC_CONFIG+=",moe_backend:${ROLLOUT_SPEC_MOE_BACKEND}"
+    # The BI=1 target is dummy-loaded and refit each step; the MTP block,
+    # which no refit carries, loads from the checkpoint.
+    if [[ "${VLLM_BATCH_INVARIANT}" == 1 ]]; then
+      SPEC_CONFIG+=",draft_load_config:{load_format:auto}"
+    fi
+    SPEC_ARGS=(
+      "+actor_rollout_ref.rollout.engine_kwargs.vllm.speculative_config={${SPEC_CONFIG}}"
+    )
+    ACTOR_SUMMARY+=" SPEC=mtp${ROLLOUT_SPEC_TOKENS}"
+    ;;
+  *) die "ROLLOUT_SPEC_MTP must be 0 or 1, got '${ROLLOUT_SPEC_MTP}'" ;;
+esac
+
 # The ModelOpt checkpoint refits through vLLM's layerwise reload.
 VLLM_WORKER_EXTENSION="verl_mlite.rollout.vllm_worker.MLiteVLLMColocateWorkerExtension"
 
@@ -605,6 +637,7 @@ COMMAND=(
   "${ACTOR_ARGS[@]}"
   "${OPTIMIZER_ARGS[@]}"
   "${MODE_ARGS[@]}"
+  "${SPEC_ARGS[@]}"
   "${ACTIVATION_ARGS[@]}"
   "${TASK_ARGS[@]}"
   "${RAY_RUNTIME_ENV[@]}"
