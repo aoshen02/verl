@@ -22,6 +22,11 @@
 # swe_bench_pro is strictly on-policy (one update per step: mini batch = train
 # batch, no routing replay at BI=1) with a 32K agent context; E2B credentials
 # come from the environment of every Ray node, never through Hydra.
+# ROLLOUT_NNODES=N (swe_bench_pro only, default 0) adds N nodes of standalone
+# rollout replicas (same vLLM settings) next to the 1-node actor and its
+# colocated rollout: the v1 separate_async trainer at zero staleness (weights
+# synced over NCCL after every step, no warmup batch, stale groups dropped), so
+# training stays strictly on-policy. The Ray cluster then has 1+N nodes.
 # Modes: quick_alignment_test (1x4, short workload, three steps), aligned.
 # Hardware: gb200 (1x4, PP1/EP4 actor, rollout DP4/EP4).
 # Image builds on `Dockerfile.nemotron_h_true_on_policy`, which installs vLLM,
@@ -33,7 +38,8 @@ set -euo pipefail
 # paths, WANDB_API_KEY, WANDB_ENTITY, WANDB_MODE, WANDB_BASE_URL, and Hydra
 # overrides; with VLLM_BATCH_INVARIANT=1 also ACTIVATION_PRECISION and
 # ACTOR_ROUTER_REPLAY, with VLLM_BATCH_INVARIANT=0 also ACTOR_PRECISION; with
-# TASK=swe_bench_pro also UNI_AGENT_TASK_CONFIG (required) and UNI_AGENT_CONCURRENCY.
+# TASK=swe_bench_pro also UNI_AGENT_TASK_CONFIG (required), UNI_AGENT_CONCURRENCY,
+# ROLLOUT_NNODES and STANDALONE_GPU_MEMORY_UTILIZATION.
 SEED="${SEED:-42}"
 ACTOR_LR="${ACTOR_LR:-1e-6}"
 
@@ -90,8 +96,11 @@ done
 
 # --- Task presets ---
 TASK="${TASK:-math}"
+: "${ROLLOUT_NNODES:=0}"
+[[ "${ROLLOUT_NNODES}" =~ ^[0-9]+$ ]] || die "ROLLOUT_NNODES must be a non-negative integer, got '${ROLLOUT_NNODES}'"
 case "${TASK}" in
   math)
+    [[ "${ROLLOUT_NNODES}" == 0 ]] || die "ROLLOUT_NNODES applies to TASK=swe_bench_pro"
     : "${MAX_PROMPT_LENGTH:=2048}"
     TASK_ARGS=(trainer.use_v1=False)
     ;;
@@ -116,9 +125,11 @@ case "${TASK}" in
     : "${SAVE_FREQ:=5}"
     : "${TEST_FREQ:=-1}"
     AF=actor_rollout_ref.rollout.custom.agent_framework
+    TRAINER_MODE=sync
+    (( ROLLOUT_NNODES == 0 )) || TRAINER_MODE=separate_async
     TASK_ARGS=(
       trainer.use_v1=True
-      trainer.v1.trainer_mode=sync
+      trainer.v1.trainer_mode="${TRAINER_MODE}"
       actor_rollout_ref.actor.ppo_epochs=1
       transfer_queue.enable=True
       data.prompt_key=prompt
@@ -193,7 +204,15 @@ else
 fi
 
 # --- Hardware profile ---
-: "${NNODES:=1}"
+# NNODES is the Ray cluster size; the actor (and its colocated rollout) always
+# takes one node, the standalone rollout pool the other ROLLOUT_NNODES.
+: "${NNODES:=$((1 + ROLLOUT_NNODES))}"
+TRAINER_NNODES="${NNODES}"
+if (( ROLLOUT_NNODES > 0 )); then
+  [[ "${NNODES}" == $((1 + ROLLOUT_NNODES)) ]] \
+    || die "ROLLOUT_NNODES=${ROLLOUT_NNODES} needs a 1+${ROLLOUT_NNODES}-node Ray cluster, got NNODES=${NNODES}"
+  TRAINER_NNODES=1
+fi
 : "${NGPUS_PER_NODE:=4}"
 : "${ACTOR_PP:=1}"
 : "${ACTOR_CP:=1}"
@@ -379,6 +398,34 @@ JSONL_FILE="${JSONL_FILE:-${OUTPUT_ROOT}/${RUN_NAME}.jsonl}"
 if [[ "${TASK}" == swe_bench_pro ]]; then
   TASK_ARGS+=("++${AF}.log_dir=${OUTPUT_ROOT}/agent_logs")
 fi
+if (( ROLLOUT_NNODES > 0 )); then
+  # Zero staleness: each step submits exactly one train batch with the weights
+  # synced at the end of the previous step, waits for all of it, and drops any
+  # group submitted under older weights. The colocated rollout serves until the
+  # whole batch is ready (ratio 1.0, never adapted).
+  SEP=trainer.v1.separate_async
+  TASK_ARGS+=(
+    "${SEP}.num_warmup_batches=0"
+    "${SEP}.parameter_sync_step=1"
+    "${SEP}.hybrid_rollout.enable_switch=True"
+    "${SEP}.hybrid_rollout.switch_threshold_ratio=1.0"
+    "${SEP}.hybrid_rollout.adaptive_switch_threshold=False"
+    trainer.v1.sampler.max_off_policy_threshold=1
+    trainer.v1.sampler.max_off_policy_strategy=drop
+    actor_rollout_ref.hybrid_engine=True
+    actor_rollout_ref.rollout.nnodes="${ROLLOUT_NNODES}"
+    actor_rollout_ref.rollout.n_gpus_per_node="${NGPUS_PER_NODE}"
+    actor_rollout_ref.rollout.checkpoint_engine.backend=nccl
+  )
+  if [[ -n "${STANDALONE_GPU_MEMORY_UTILIZATION:-}" ]]; then
+    TASK_ARGS+=(
+      "actor_rollout_ref.rollout.standalone_gpu_memory_utilization=${STANDALONE_GPU_MEMORY_UTILIZATION}"
+    )
+  fi
+  # The cross-node weight sync runs NCCL inside the container.
+  export NCCL_MNNVL_ENABLE="${NCCL_MNNVL_ENABLE:-0}" NCCL_CUMEM_ENABLE="${NCCL_CUMEM_ENABLE:-0}"
+  [[ " ${ARM_ENV_NAMES[*]} " == *" NCCL_CUMEM_ENABLE "* ]] || ARM_ENV_NAMES+=(NCCL_CUMEM_ENABLE)
+fi
 if [[ "${DRY_RUN:-0}" != 1 && "${NNODES}" -gt 1 ]]; then
   : "${RAY_ADDRESS:?multi-node modes require an existing Ray cluster}"
 fi
@@ -492,7 +539,7 @@ HYDRA_ARGS=(
   trainer.project_name="${PROJECT_NAME}"
   trainer.experiment_name="${RUN_NAME}"
   trainer.n_gpus_per_node="${NGPUS_PER_NODE}"
-  trainer.nnodes="${NNODES}"
+  trainer.nnodes="${TRAINER_NNODES}"
   trainer.total_training_steps="${TOTAL_TRAINING_STEPS}"
   trainer.save_freq="${SAVE_FREQ}"
   trainer.test_freq="${TEST_FREQ}"
