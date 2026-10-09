@@ -153,6 +153,9 @@ case "${TASK}" in
       "++${AF}.enable_last_assistant_rollback=True"
       # Fail the step instead of training on a batch that lost prompts to sandbox errors.
       "++${AF}.max_failed_prompt_fraction=${UNI_AGENT_MAX_FAILED_PROMPT_FRACTION:-0.25}"
+      # ...or too many sessions, and drop groups too small for a GRPO baseline.
+      "++${AF}.max_failed_session_fraction=${UNI_AGENT_MAX_FAILED_SESSION_FRACTION:-0.25}"
+      "++${AF}.min_group_size=${UNI_AGENT_MIN_GROUP_SIZE:-$(( (ROLLOUT_N + 1) / 2 ))}"
       reward.custom_reward_function.path=pkg://uni_agent.framework.task_runner
       reward.custom_reward_function.name=score_from_runner_result
       reward.reward_kwargs.overlong_buffer_cfg.enable=False
@@ -463,8 +466,9 @@ for name in "${RAY_ENV_NAMES[@]}"; do
 done
 
 # Cluster launchers should point MLITE_DCP_LOCAL_STAGE_DIR at node-local disk.
+# Sandbox timeouts reach agent runners on every node, not only the driver's.
 for name in WANDB_ENTITY WANDB_MODE WANDB_BASE_URL HF_HUB_OFFLINE NCCL_MNNVL_ENABLE MLITE_DCP_LOCAL_STAGE_DIR \
-  "${ARM_ENV_NAMES[@]}"; do
+  SANDBOX_STARTUP_TIMEOUT E2B_CAPACITY_WAIT E2B_EXEC_HARD_TIMEOUT "${ARM_ENV_NAMES[@]}"; do
   if [[ -v "${name}" ]]; then
     RAY_RUNTIME_ENV+=(
       "+ray_kwargs.ray_init.runtime_env.env_vars.${name}=\"${!name}\""
