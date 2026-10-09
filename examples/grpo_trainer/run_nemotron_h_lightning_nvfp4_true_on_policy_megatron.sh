@@ -39,8 +39,8 @@ set -euo pipefail
 # paths, WANDB_API_KEY, WANDB_ENTITY, WANDB_MODE, WANDB_BASE_URL, and Hydra
 # overrides; with VLLM_BATCH_INVARIANT=1 also ACTIVATION_PRECISION and
 # ACTOR_ROUTER_REPLAY and ACTOR_PP_MAX_IN_FLIGHT, with VLLM_BATCH_INVARIANT=0 also
-# ACTOR_PRECISION; at either setting ROLLOUT_SPEC_MTP (+ROLLOUT_SPEC_TOKENS,
-# ROLLOUT_SPEC_MOE_BACKEND); with
+# ACTOR_PRECISION and MTP (+MTP_SPEC_TOKENS, MTP_LR, MTP_LOSS_COEF,
+# MTP_SPEC_MOE_BACKEND); with
 # TASK=swe_bench_pro also UNI_AGENT_TASK_CONFIG (required), UNI_AGENT_CONCURRENCY,
 # ROLLOUT_NNODES and STANDALONE_GPU_MEMORY_UTILIZATION.
 SEED="${SEED:-42}"
@@ -160,6 +160,8 @@ case "${TASK}" in
       "++${AF}.agent_runners.task.runner_fqn=uni_agent.framework.task_runner.run_task"
       "++${AF}.agent_runners.task.dispatch_mode=ray_task"
       "++${AF}.agent_runners.task.max_concurrent_sessions=${UNI_AGENT_CONCURRENCY:-512}"
+      # A session (all turns and tool calls) that outlives this deadline is aborted.
+      "++${AF}.agent_runners.task.session_timeout_seconds=${UNI_AGENT_SESSION_TIMEOUT:-3600}"
       "++${AF}.agent_runners.task.trajectory_selection=longest"
       "++${AF}.agent_runners.task.runner_kwargs.task_config_path=${UNI_AGENT_TASK_CONFIG}"
       "++${AF}.mask_unfinished_episode=False"
@@ -419,7 +421,7 @@ elif [[ "${VLLM_BATCH_INVARIANT}" == 0 ]]; then
     ++actor_rollout_ref.actor.megatron.override_transformer_config.recompute_granularity=full
     ++actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method=uniform
     ++actor_rollout_ref.actor.megatron.override_transformer_config.recompute_num_layers=1
-    # RL trains the backbone only: no MTP block, frozen expert-bias updates.
+    # No MTP block unless MTP=1 (which trains it detached); frozen expert-bias updates.
     ++actor_rollout_ref.actor.megatron.override_transformer_config.mtp_num_layers=null
     ++actor_rollout_ref.actor.megatron.override_transformer_config.mtp_hybrid_override_pattern=null
     ++actor_rollout_ref.actor.megatron.override_transformer_config.moe_router_bias_update_rate=0.0
@@ -435,35 +437,55 @@ else
 fi
 export VLLM_BATCH_INVARIANT
 
-# --- Optional MTP speculative decoding in the rollout (default off) ---
-# The checkpoint's MTP head drafts ROLLOUT_SPEC_TOKENS tokens per step; rejection
-# sampling keeps the target distribution and the returned logprobs are the
-# target's (at BI=1 bitwise those of non-speculative decoding: Mamba2 exact
-# replay rejects drafts on SSD chunk ends). RL trains the backbone only, so the
-# MTP block keeps its checkpoint weights while sharing the target's embedding
-# and LM head, which every refit updates.
-: "${ROLLOUT_SPEC_MTP:=0}"
-SPEC_ARGS=()
-case "${ROLLOUT_SPEC_MTP}" in
+# --- Optional MTP: speculative decoding in the rollout, trained head (default off) ---
+# MTP=1 drafts MTP_SPEC_TOKENS tokens per rollout step with the checkpoint's MTP
+# block (rejection sampling keeps the target distribution; the returned
+# logprobs are the target's) and trains that block during RL, so its proposals
+# follow the policy. The block sees the backbone's hidden states, the token
+# embedding and the LM head detached: its loss (next-next-token cross-entropy
+# on the sampled response tokens, scaled by MTP_LOSS_COEF) reaches only the
+# MTP parameters, which train at MTP_LR and are clipped on their own gradient
+# norm, so the policy update is unchanged. Each refit sends mtp.* to the
+# drafter, whose embedding and LM head are the target's.
+: "${MTP:=0}"
+MTP_ARGS=()
+case "${MTP}" in
   0) ;;
   1)
-    : "${ROLLOUT_SPEC_TOKENS:=1}"
+    : "${MTP_SPEC_TOKENS:=1}"
+    : "${MTP_LR:=1e-5}"
+    : "${MTP_LOSS_COEF:=0.1}"
     # The MTP block is BF16, which the NVFP4-only CuTe-DSL MoE backend rejects;
     # Triton's unquantized MoE rejects the one-sided NVLink all2all under EP.
-    : "${ROLLOUT_SPEC_MOE_BACKEND:=flashinfer_cutlass}"
-    SPEC_CONFIG="method:mtp,num_speculative_tokens:${ROLLOUT_SPEC_TOKENS}"
-    SPEC_CONFIG+=",moe_backend:${ROLLOUT_SPEC_MOE_BACKEND}"
-    # The BI=1 target is dummy-loaded and refit each step; the MTP block,
-    # which no refit carries, loads from the checkpoint.
-    if [[ "${VLLM_BATCH_INVARIANT}" == 1 ]]; then
-      SPEC_CONFIG+=",draft_load_config:{load_format:auto}"
-    fi
-    SPEC_ARGS=(
+    : "${MTP_SPEC_MOE_BACKEND:=flashinfer_cutlass}"
+    SPEC_CONFIG="moe_backend:${MTP_SPEC_MOE_BACKEND}"
+    # The BI=1 engine dummy-loads the target and refits it before the first
+    # rollout; the drafter's block loads from the checkpoint until its own refit.
+    [[ "${VLLM_BATCH_INVARIANT}" == 1 ]] && SPEC_CONFIG+=",draft_load_config:{load_format:auto}"
+    MTP_ARGS=(
+      actor_rollout_ref.model.mtp.enable=True
+      actor_rollout_ref.model.mtp.enable_train=True
+      actor_rollout_ref.model.mtp.enable_rollout=True
+      actor_rollout_ref.model.mtp.method=mtp
+      actor_rollout_ref.model.mtp.num_speculative_tokens="${MTP_SPEC_TOKENS}"
+      actor_rollout_ref.model.mtp.mtp_loss_scaling_factor="${MTP_LOSS_COEF}"
+      actor_rollout_ref.model.mtp.lr="${MTP_LR}"
       "+actor_rollout_ref.rollout.engine_kwargs.vllm.speculative_config={${SPEC_CONFIG}}"
     )
-    ACTOR_SUMMARY+=" SPEC=mtp${ROLLOUT_SPEC_TOKENS}"
+    # Megatron (BI=0): detach the block's inputs and tag its parameters for
+    # their own norm. Megatron Lite (BI=1) always trains the block that way.
+    [[ "${VLLM_BATCH_INVARIANT}" == 0 ]] \
+      && MTP_ARGS+=(++actor_rollout_ref.actor.megatron.override_transformer_config.mtp_detach_heads=True)
+    # Keep the checkpoint's MTP block in the actor.
+    kept=()
+    for arg in "${ACTOR_ARGS[@]}"; do
+      [[ "${arg}" == *override_transformer_config.mtp_num_layers=null \
+        || "${arg}" == *override_transformer_config.mtp_hybrid_override_pattern=null ]] || kept+=("${arg}")
+    done
+    ACTOR_ARGS=("${kept[@]}")
+    ACTOR_SUMMARY+=" MTP=k${MTP_SPEC_TOKENS},lr${MTP_LR}"
     ;;
-  *) die "ROLLOUT_SPEC_MTP must be 0 or 1, got '${ROLLOUT_SPEC_MTP}'" ;;
+  *) die "MTP must be 0 or 1, got '${MTP}'" ;;
 esac
 
 # The ModelOpt checkpoint refits through vLLM's layerwise reload.
@@ -637,7 +659,7 @@ COMMAND=(
   "${ACTOR_ARGS[@]}"
   "${OPTIMIZER_ARGS[@]}"
   "${MODE_ARGS[@]}"
-  "${SPEC_ARGS[@]}"
+  "${MTP_ARGS[@]}"
   "${ACTIVATION_ARGS[@]}"
   "${TASK_ARGS[@]}"
   "${RAY_RUNTIME_ENV[@]}"

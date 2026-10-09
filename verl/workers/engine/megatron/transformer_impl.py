@@ -497,7 +497,17 @@ class MegatronEngine(BaseEngine):
             fp16=self.param_dtype == torch.float16,
             bf16=self.param_dtype == torch.bfloat16,
         )
-        optimizer = get_megatron_optimizer(model=self.module, config=optim_config_megatron)
+        config_overrides = None
+        mtp_lr = self.model_config.mtp.lr if self.model_config.mtp.enable_train else None
+        if mtp_lr is not None:
+            from megatron.core.optimizer import ParamKey, get_standard_config_overrides
+
+            # MTP parameters (tagged by mtp_detach_heads) train at their own rate.
+            config_overrides = get_standard_config_overrides(optim_config_megatron)
+            config_overrides[ParamKey(attr="grad_norm_group")] = {"max_lr": mtp_lr, "min_lr": mtp_lr}
+        optimizer = get_megatron_optimizer(
+            model=self.module, config=optim_config_megatron, config_overrides=config_overrides
+        )
         register_megatron_training_hooks(self.module, optimizer)
         return optimizer
 
@@ -650,6 +660,8 @@ class MegatronEngine(BaseEngine):
         if getattr(self, "_distillation_use_topk_active", False):
             get_torch_device().empty_cache()
         update_successful, grad_norm, num_zeros_in_grad = self.optimizer.step()
+        # Separately clipped groups (mtp_detach_heads tags the MTP block "mtp").
+        self.mtp_grad_norm = getattr(self.optimizer, "grad_norms_by_group", {}).get("mtp")
 
         if update_successful:
             # allgather already execute in optimizer.step in new megatron
@@ -912,6 +924,15 @@ class MegatronEngine(BaseEngine):
         # batch should be a list of batches inside micro-batches
         batch_generator = make_batch_generator(micro_batches, vpp_size=len(self.module))
 
+        # A hybrid model's MTP block runs in every non-inference forward; keep it
+        # out of log-prob passes so they cost and return what they do without it.
+        hybrid_mtp_chunks = [
+            chunk for chunk in map(unwrap_model, self.module) if getattr(chunk, "mtp_process", False)
+        ]
+        self._mtp_train_forward = not (forward_only and hybrid_mtp_chunks)
+        for chunk in hybrid_mtp_chunks:
+            chunk.mtp_process = not forward_only
+
         # TODO: we may use the new schedule instead
         # for flash-attn: (seq_len, batch_size, hidden_size) = (mbs*seq_len, 1, hidden_size)
         losses_reduced = forward_backward_func(
@@ -923,6 +944,8 @@ class MegatronEngine(BaseEngine):
             micro_batch_size=1,  # the communication shape is obtained via p2p comm
             forward_only=forward_only,
         )
+        for chunk in hybrid_mtp_chunks:
+            chunk.mtp_process = True
 
         if self.model_config.mtp.enable and mpu.is_pipeline_last_stage(ignore_virtual=True):
             # All CP ranks must participate in the all_reduce inside get_megatron_mtp_loss,
@@ -1372,7 +1395,9 @@ class MegatronEngineWithLMHead(MegatronEngine):
                 vision_model=hasattr(self.model_config.hf_config, "vision_config"),
                 pad_token_id=self.model_config.tokenizer.pad_token_id,
                 data_format=data_format,
-                mtp_enable_train=self.model_config.mtp.enable and self.model_config.mtp.enable_train,
+                mtp_enable_train=self.model_config.mtp.enable
+                and self.model_config.mtp.enable_train
+                and getattr(self, "_mtp_train_forward", True),
                 local_cp_size=local_cp_size,
                 router_padding_mask=router_padding_mask,
                 mtp_loss_normalization_factor=mtp_loss_normalization_factor,

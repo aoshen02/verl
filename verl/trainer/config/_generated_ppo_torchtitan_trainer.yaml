@@ -425,6 +425,7 @@ actor_rollout_ref:
       enable_rollout: false
       detach_encoder: false
       mtp_loss_scaling_factor: 0.1
+      lr: null
       speculative_algorithm: EAGLE
       speculative_num_steps: 3
       speculative_eagle_topk: 1
@@ -638,6 +639,7 @@ critic:
       enable_rollout: false
       detach_encoder: false
       mtp_loss_scaling_factor: 0.1
+      lr: null
       speculative_algorithm: EAGLE
       speculative_num_steps: 3
       speculative_eagle_topk: 1

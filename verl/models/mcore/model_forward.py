@@ -180,6 +180,10 @@ def gptmodel_forward_model_engine(
 
         args = {}
         if mtp_enable_train and post_process:
+            # A HybridModel derives the MTP labels from input_ids (and returns
+            # logits, not the LM loss, without labels): its loss_mask stays
+            # aligned to the input positions.
+            hybrid_mtp = getattr(unwrap_model(model), "mtp_pattern", None) is not None
             # Use input_ids sequence length to ensure label and loss_mask alignment
             input_ids_offsets = input_ids.offsets()
             input_ids_lengths = input_ids_offsets.diff().tolist()
@@ -195,14 +199,15 @@ def gptmodel_forward_model_engine(
                 args[k] = preprocess_thd_engine(
                     v,
                     pre_process=True,
-                    need_roll=True,
+                    need_roll=not hybrid_mtp,
                     use_fp8_padding=use_fp8_padding,
                     local_cp_size=local_cp_size,
                     pad_to_length_bucket=pad_to_length_bucket,
                     cp_layout=cp_layout,
                 )[0]
 
-            model_kwargs["labels"] = args["label"].contiguous()
+            if not hybrid_mtp:
+                model_kwargs["labels"] = args["label"].contiguous()
             model_kwargs["loss_mask"] = args["loss_mask"].contiguous()
 
         if logits_processor_args and "loss_mask" in logits_processor_args:
