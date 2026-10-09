@@ -130,10 +130,21 @@ case "${TASK}" in
     AF=actor_rollout_ref.rollout.custom.agent_framework
     TRAINER_MODE=sync
     (( ROLLOUT_NNODES == 0 )) || TRAINER_MODE=separate_async
+    # OLD_LOG_PROB=rollout skips the actor's old-log-prob pass and uses the
+    # rollout's log-probs (bypass mode). With one update per step actor/ppo_kl
+    # then measures the rollout/actor mismatch, and entropy comes from the
+    # update forward.
+    case "${OLD_LOG_PROB:=recompute}" in
+      recompute) BYPASS_OLD_LOG_PROB=False ;;
+      rollout) BYPASS_OLD_LOG_PROB=True ;;
+      *) die "OLD_LOG_PROB must be recompute or rollout, got '${OLD_LOG_PROB}'" ;;
+    esac
     TASK_ARGS=(
       trainer.use_v1=True
       trainer.v1.trainer_mode="${TRAINER_MODE}"
       actor_rollout_ref.actor.ppo_epochs=1
+      algorithm.rollout_correction.bypass_mode="${BYPASS_OLD_LOG_PROB}"
+      actor_rollout_ref.actor.calculate_entropy="${BYPASS_OLD_LOG_PROB}"
       transfer_queue.enable=True
       data.prompt_key=prompt
       data.return_raw_chat=True
