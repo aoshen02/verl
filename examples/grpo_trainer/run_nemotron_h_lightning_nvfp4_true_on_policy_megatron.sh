@@ -238,6 +238,10 @@ MAX_MODEL_LEN=$((MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH))
 # Routed-experts capture (R3) needs Model Runner V2 as well.
 export VLLM_USE_V2_MODEL_RUNNER=1
 if [[ "${VLLM_BATCH_INVARIANT}" == 1 ]]; then
+  # The aligned actor's Mamba replay and attention do not handle a context-split
+  # sequence yet; refuse CP>1 instead of training on wrong log-probs.
+  [[ "${ACTOR_CP}" == 1 ]] \
+    || die "ACTOR_CP=${ACTOR_CP}: the VLLM_BATCH_INVARIANT=1 actor supports ACTOR_CP=1 only"
   : "${ACTOR_OPTIMIZER:=fsdp2}"
   case "${ACTOR_OPTIMIZER}" in
     # The actor's training state stays on the GPU during rollout; larger values
