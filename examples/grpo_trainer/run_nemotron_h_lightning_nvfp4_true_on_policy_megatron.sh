@@ -3,9 +3,10 @@
 # VLLM_BATCH_INVARIANT=1 (default): batch-invariant vLLM rollout and a Megatron
 # Lite actor on the same vLLM kernels, for exact probabilities.
 # VLLM_BATCH_INVARIANT=0: the conventional baseline, not true on-policy: vLLM's
-# default kernels with prefix caching, the verl Megatron engine (Megatron-Bridge/
-# mcore) on the BF16 release and rollout routing replay (R3); every sync
-# requantizes the weights into the checkpoint's ModelOpt format. The actor runs
+# default kernels, the verl Megatron engine (Megatron-Bridge/mcore) on the BF16
+# release and rollout routing replay (R3); every sync requantizes the weights
+# into the checkpoint's ModelOpt format. Both arms keep vLLM prefix caching on
+# for the multi-turn agent workload. The actor runs
 # weight QAT by default (ACTOR_PRECISION=qat: forward on the deployed NVFP4/FP8
 # weights); ACTOR_PRECISION=bf16 trains on the BF16 masters as they are. Like the
 # baseline-r3 recipe, it logs to W&B project verl-nemotron-h-baseline-r3 and
@@ -282,7 +283,6 @@ if [[ "${VLLM_BATCH_INVARIANT}" == 1 ]]; then
     actor_rollout_ref.rollout.seed="${SEED}"
     +actor_rollout_ref.rollout.engine_kwargs.vllm.all2all_backend=flashinfer_nvlink_one_sided
   )
-  PREFIX_CACHING_ARGS=(actor_rollout_ref.rollout.enable_prefix_caching=False)
   OPTIMIZER_ARGS=(
     +actor_rollout_ref.actor.engine.impl_cfg.optimizer="${ACTOR_OPTIMIZER}"
     actor_rollout_ref.actor.engine.param_offload=False
@@ -327,7 +327,6 @@ elif [[ "${VLLM_BATCH_INVARIANT}" == 0 ]]; then
   ARM=_bi0
   PROJECT_NAME="${PROJECT_NAME:-verl-nemotron-h-baseline-r3}"
   ARM_ENV_NAMES=(NCCL_CUMEM_ENABLE)
-  PREFIX_CACHING_ARGS=()
   ACTOR_SUMMARY="BI=0 PRECISION=${ACTOR_PRECISION} ROUTING_REPLAY=R3"
   MODE_ARGS=(
     actor_rollout_ref.rollout.seed="${SEED}"
@@ -523,7 +522,6 @@ HYDRA_ARGS=(
   actor_rollout_ref.rollout.max_model_len="${MAX_MODEL_LEN}"
   actor_rollout_ref.rollout.max_num_seqs="${ROLLOUT_MAX_NUM_SEQS}"
   actor_rollout_ref.rollout.max_num_batched_tokens="${ROLLOUT_MAX_NUM_BATCHED_TOKENS}"
-  "${PREFIX_CACHING_ARGS[@]}"
   actor_rollout_ref.rollout.checkpoint_engine.update_weights_bucket_megabytes=1024
   +actor_rollout_ref.rollout.engine_kwargs.vllm.worker_extension_cls="${VLLM_WORKER_EXTENSION}"
   +actor_rollout_ref.rollout.engine_kwargs.vllm.kv_cache_dtype="${ROLLOUT_KV_CACHE_DTYPE}"
