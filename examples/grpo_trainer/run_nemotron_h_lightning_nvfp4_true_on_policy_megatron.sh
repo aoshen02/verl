@@ -430,8 +430,9 @@ if (( ROLLOUT_NNODES > 0 )); then
       "actor_rollout_ref.rollout.standalone_gpu_memory_utilization=${STANDALONE_GPU_MEMORY_UTILIZATION}"
     )
   fi
-  # The cross-node weight sync runs NCCL inside the container.
-  export NCCL_MNNVL_ENABLE="${NCCL_MNNVL_ENABLE:-0}" NCCL_CUMEM_ENABLE="${NCCL_CUMEM_ENABLE:-0}"
+  # The cross-node weight sync runs NCCL inside the container, where both must be off; GB200 images
+  # set them to 1, so a fallback default never applies. ROLLOUT_NCCL_MNNVL/CUMEM override.
+  export NCCL_MNNVL_ENABLE="${ROLLOUT_NCCL_MNNVL:-0}" NCCL_CUMEM_ENABLE="${ROLLOUT_NCCL_CUMEM:-0}"
   [[ " ${ARM_ENV_NAMES[*]} " == *" NCCL_CUMEM_ENABLE "* ]] || ARM_ENV_NAMES+=(NCCL_CUMEM_ENABLE)
 fi
 if [[ "${DRY_RUN:-0}" != 1 && "${NNODES}" -gt 1 ]]; then
