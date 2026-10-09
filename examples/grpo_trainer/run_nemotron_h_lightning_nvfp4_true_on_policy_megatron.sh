@@ -38,7 +38,8 @@ set -euo pipefail
 # Optional env: VLLM_BATCH_INVARIANT, training steps, batch size, lengths, output
 # paths, WANDB_API_KEY, WANDB_ENTITY, WANDB_MODE, WANDB_BASE_URL, and Hydra
 # overrides; with VLLM_BATCH_INVARIANT=1 also ACTIVATION_PRECISION and
-# ACTOR_ROUTER_REPLAY, with VLLM_BATCH_INVARIANT=0 also ACTOR_PRECISION; with
+# ACTOR_ROUTER_REPLAY and ACTOR_PP_MAX_IN_FLIGHT, with VLLM_BATCH_INVARIANT=0 also
+# ACTOR_PRECISION; with
 # TASK=swe_bench_pro also UNI_AGENT_TASK_CONFIG (required), UNI_AGENT_CONCURRENCY,
 # ROLLOUT_NNODES and STANDALONE_GPU_MEMORY_UTILIZATION.
 SEED="${SEED:-42}"
@@ -274,6 +275,21 @@ if [[ "${VLLM_BATCH_INVARIANT}" == 1 ]]; then
   ARM_ENV_NAMES=()
   ACTOR_SUMMARY="OPTIMIZER=${ACTOR_OPTIMIZER} ACTIVATIONS=${ACTIVATION_PRECISION}"
   ACTOR_SUMMARY+=" ROUTING_REPLAY=${ACTOR_ROUTER_REPLAY}"
+  # ACTOR_PP_MAX_IN_FLIGHT=c caps the micro-batches a PP stage holds activations
+  # for at c + 1 (empty: plain 1F1B, stage r holds pp - r); gradients are
+  # bitwise identical. SWE trajectories reach 128K tokens, and at PP4 1F1B's
+  # four in-flight micro-batches add ~45 GiB on stage 0, so SWE runs them one
+  # at a time.
+  if [[ -z "${ACTOR_PP_MAX_IN_FLIGHT+x}" && "${TASK}" == swe_bench_pro && "${ACTOR_PP}" -gt 1 ]]; then
+    ACTOR_PP_MAX_IN_FLIGHT=0
+  fi
+  PP_IN_FLIGHT_ARGS=()
+  if [[ -n "${ACTOR_PP_MAX_IN_FLIGHT:-}" ]]; then
+    [[ "${ACTOR_PP_MAX_IN_FLIGHT}" =~ ^[0-9]+$ ]] \
+      || die "ACTOR_PP_MAX_IN_FLIGHT must be a non-negative integer, got '${ACTOR_PP_MAX_IN_FLIGHT}'"
+    PP_IN_FLIGHT_ARGS=(+actor_rollout_ref.actor.engine.impl_cfg.pp_max_in_flight="${ACTOR_PP_MAX_IN_FLIGHT}")
+    ACTOR_SUMMARY+=" PP_MAX_IN_FLIGHT=${ACTOR_PP_MAX_IN_FLIGHT}"
+  fi
   MODE_ARGS=(
     actor_rollout_ref.actor.engine.impl=vllm
     +actor_rollout_ref.actor.engine.seed="${SEED}"
@@ -314,6 +330,7 @@ if [[ "${VLLM_BATCH_INVARIANT}" == 1 ]]; then
     actor_rollout_ref.actor.engine.export_dtype=null
     +actor_rollout_ref.actor.engine.impl_cfg.bf16_master_path="${BF16_MASTER_PATH}"
     +actor_rollout_ref.actor.engine.impl_cfg.recompute=full
+    "${PP_IN_FLIGHT_ARGS[@]}"
   )
   ENGINE_ARGS=("hydra.searchpath=[file://${runtime_config_root},pkg://verl_mlite.config]" model_engine=mlite)
 elif [[ "${VLLM_BATCH_INVARIANT}" == 0 ]]; then
@@ -323,6 +340,8 @@ elif [[ "${VLLM_BATCH_INVARIANT}" == 0 ]]; then
   : "${ROLLOUT_GPU_MEMORY_UTILIZATION:=0.45}"
   [[ "${ACTIVATION_PRECISION:-release}" == release ]] \
     || die "ACTIVATION_PRECISION applies to VLLM_BATCH_INVARIANT=1; BI=0 uses ACTOR_PRECISION"
+  [[ -z "${ACTOR_PP_MAX_IN_FLIGHT:-}" ]] \
+    || die "ACTOR_PP_MAX_IN_FLIGHT applies to the VLLM_BATCH_INVARIANT=1 Megatron Lite actor"
   ROLLOUT_KV_CACHE_DTYPE=fp8_e4m3
   ACTIVATION_ARGS=()
   # Packed Mamba sequences need their per-sequence seq_idx, which needs CP=1; with
