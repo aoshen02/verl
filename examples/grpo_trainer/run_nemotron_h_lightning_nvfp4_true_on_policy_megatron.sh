@@ -31,6 +31,10 @@
 # PIN_DP_RANK_BY_SESSION (swe_bench_pro, default True) sends every turn of an
 # agent session to one DP rank of its rollout replica (stable hash of the
 # session id), so multi-turn sessions keep their prefix cache.
+# SWE_OVERPROVISION_GROUPS=K (swe_bench_pro sync only, default 0) launches
+# TRAIN_BATCH_SIZE+K prompt groups per step and trains on the first
+# TRAIN_BATCH_SIZE to finish; uni-agent cuts the K slowest (cancels their
+# runners, aborts their sessions, kills their sandboxes).
 # Modes: quick_alignment_test (1x4, short workload, three steps), aligned.
 # Hardware: gb200 (1x4, PP1/EP4 actor, rollout DP4/EP4).
 # Image builds on `Dockerfile.nemotron_h_true_on_policy`, which installs vLLM,
@@ -42,10 +46,11 @@ set -euo pipefail
 # paths, WANDB_API_KEY, WANDB_ENTITY, WANDB_MODE, WANDB_BASE_URL, and Hydra
 # overrides; with VLLM_BATCH_INVARIANT=1 also ACTIVATION_PRECISION and
 # ACTOR_ROUTER_REPLAY and ACTOR_PP_MAX_IN_FLIGHT, with VLLM_BATCH_INVARIANT=0 also
-# ACTOR_PRECISION and MTP (+MTP_SPEC_TOKENS, MTP_LR, MTP_LOSS_COEF,
+# ACTOR_PRECISION; at either setting MTP (+MTP_SPEC_TOKENS, MTP_LR, MTP_LOSS_COEF,
 # MTP_SPEC_MOE_BACKEND); with
 # TASK=swe_bench_pro also UNI_AGENT_TASK_CONFIG (required), UNI_AGENT_CONCURRENCY,
-# ROLLOUT_NNODES, STANDALONE_GPU_MEMORY_UTILIZATION and PIN_DP_RANK_BY_SESSION.
+# ROLLOUT_NNODES, STANDALONE_GPU_MEMORY_UTILIZATION, PIN_DP_RANK_BY_SESSION and
+# SWE_OVERPROVISION_GROUPS.
 SEED="${SEED:-42}"
 ACTOR_LR="${ACTOR_LR:-1e-6}"
 
@@ -134,6 +139,11 @@ case "${TASK}" in
     AF=actor_rollout_ref.rollout.custom.agent_framework
     TRAINER_MODE=sync
     (( ROLLOUT_NNODES == 0 )) || TRAINER_MODE=separate_async
+    : "${SWE_OVERPROVISION_GROUPS:=0}"
+    [[ "${SWE_OVERPROVISION_GROUPS}" =~ ^[0-9]+$ ]] \
+      || die "SWE_OVERPROVISION_GROUPS must be a non-negative integer, got '${SWE_OVERPROVISION_GROUPS}'"
+    [[ "${SWE_OVERPROVISION_GROUPS}" == 0 || "${TRAINER_MODE}" == sync ]] \
+      || die "SWE_OVERPROVISION_GROUPS needs the sync trainer (ROLLOUT_NNODES=0)"
     # OLD_LOG_PROB=rollout skips the actor's old-log-prob pass and uses the
     # rollout's log-probs (bypass mode). With one update per step actor/ppo_kl
     # then measures the rollout/actor mismatch, and entropy comes from the
@@ -150,6 +160,7 @@ case "${TASK}" in
     TASK_ARGS=(
       trainer.use_v1=True
       trainer.v1.trainer_mode="${TRAINER_MODE}"
+      trainer.v1.sampler.sync_over_provision_prompts="${SWE_OVERPROVISION_GROUPS}"
       actor_rollout_ref.actor.ppo_epochs=1
       algorithm.rollout_correction.bypass_mode="${BYPASS_OLD_LOG_PROB}"
       actor_rollout_ref.actor.calculate_entropy="${BYPASS_OLD_LOG_PROB}"
