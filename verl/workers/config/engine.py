@@ -240,6 +240,15 @@ class McoreEngineConfig(EngineConfig):
                     "qat.mode=modelopt_mixed requires mixed_precision_export=True and vice versa, "
                     f"got qat.mode={self.qat.get('mode')}, mixed_precision_export={self.mixed_precision_export}"
                 )
+            # Megatron uses the tensor parallel size for experts when theirs is unset.
+            expert_tp = self.expert_tensor_parallel_size or self.tensor_model_parallel_size
+            if self.qat.get("mode") == "modelopt_mixed" and (self.tensor_model_parallel_size != 1 or expert_tp != 1):
+                # The QAT forward quantizes each rank's shard, the exporter the full
+                # tensor; their scales differ once a weight is split.
+                raise ValueError(
+                    "qat.mode=modelopt_mixed requires tensor_model_parallel_size=1 and "
+                    f"expert_tensor_parallel_size=1, got {self.tensor_model_parallel_size} and {expert_tp}"
+                )
 
 
 @dataclass
