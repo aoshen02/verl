@@ -84,6 +84,17 @@ _MIXED_PRECISION_WEIGHT_QUANTIZERS = {
 }
 
 
+def _dequantize(algorithm: str, tensors: dict[str, torch.Tensor]) -> torch.Tensor:
+    from megatron.lite.model.nemotron_h.quantization import nvfp4_decode_values
+
+    if algorithm == "FP8":
+        return tensors["weight"].float() * tensors["weight_scale"].float()
+    values = nvfp4_decode_values(tensors["weight"])
+    rows, cols = values.shape
+    unit = tensors["weight_scale"].float() * tensors["weight_scale_2"].float().reshape(())
+    return (values.reshape(rows, cols // 16, 16) * unit[..., None]).reshape(rows, cols)
+
+
 class RequantSTEQuantizer(TensorQuantizer):
     """Weight fake-quantizer whose forward value is the deployed weight.
 
@@ -97,12 +108,12 @@ class RequantSTEQuantizer(TensorQuantizer):
         self.algorithm = algorithm
 
     def forward(self, inputs):
-        from verl.utils.modelopt.mixed_precision_quant import dequantize, requantize
+        from megatron.lite.model.nemotron_h.quantization import requantize
 
         if not isinstance(inputs, torch.Tensor) or inputs.ndim != 2:
             raise RuntimeError(f"RequantSTEQuantizer expects a 2-D weight, got {type(inputs)}")
         with torch.no_grad():
-            deployed = dequantize(self.algorithm, requantize(self.algorithm, inputs.detach().to(torch.bfloat16)))
+            deployed = _dequantize(self.algorithm, requantize(self.algorithm, inputs.detach().to(torch.bfloat16)))
         return inputs + (deployed.to(inputs.dtype) - inputs).detach()
 
 

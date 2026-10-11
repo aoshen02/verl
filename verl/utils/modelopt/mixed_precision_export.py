@@ -16,7 +16,7 @@
 The rollout serves a ModelOpt mixed-precision checkpoint (``hf_quant_config.json``
 with ``quant_algo: MIXED_PRECISION``) while the trainer holds BF16 weights. Every
 weight sync re-quantizes the current weights with
-``verl.utils.modelopt.mixed_precision_quant.requantize`` (Transformer Engine
+``megatron.lite.model.nemotron_h.quantization.requantize`` (Transformer Engine
 NVFP4 4over6/MSE with the 256 E4M3 bound and global = amax / 1536; FP8 per-tensor
 amax / 448), the rule the ``modelopt_mixed`` QAT forward also uses.
 
@@ -64,7 +64,7 @@ class ModelOptMixedPrecisionExporter:
 
     @staticmethod
     def _requantize(algo: str, name: str, weight: torch.Tensor):
-        from verl.utils.modelopt.mixed_precision_quant import requantize
+        from megatron.lite.model.nemotron_h.quantization import requantize
 
         for suffix, value in requantize(algo, weight.to(torch.bfloat16)).items():
             yield name.removesuffix("weight") + suffix, value
