@@ -36,21 +36,14 @@ import torch
 _STATIC_SUFFIXES = ("input_scale", "k_scale", "v_scale")
 
 
-def load_mixed_precision_config(model_path: str) -> dict | None:
-    path = os.path.join(model_path, "hf_quant_config.json")
-    if not os.path.isfile(path):
-        return None
-    with open(path) as f:
-        quant = json.load(f)["quantization"]
-    if quant.get("quant_algo") != "MIXED_PRECISION":
-        return None
-    return quant
-
-
 class ModelOptMixedPrecisionExporter:
-    def __init__(self, model_path: str, quant: dict):
+    def __init__(self, model_path: str):
         from safetensors import safe_open
 
+        with open(os.path.join(model_path, "hf_quant_config.json")) as f:
+            quant = json.load(f)["quantization"]
+        if quant.get("quant_algo") != "MIXED_PRECISION":
+            raise ValueError(f"{model_path} is not a ModelOpt MIXED_PRECISION checkpoint")
         self.layers = {name: cfg["quant_algo"] for name, cfg in quant["quantized_layers"].items()}
         unknown = set(self.layers.values()) - {"FP8", "W4A16_NVFP4"}
         if unknown:

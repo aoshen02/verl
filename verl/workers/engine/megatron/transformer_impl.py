@@ -1015,15 +1015,9 @@ class MegatronEngine(BaseEngine):
 
     def _mixed_precision_exporter(self):
         if not hasattr(self, "_mp_exporter"):
-            from verl.utils.modelopt.mixed_precision_export import (
-                ModelOptMixedPrecisionExporter,
-                load_mixed_precision_config,
-            )
+            from verl.utils.modelopt.mixed_precision_export import ModelOptMixedPrecisionExporter
 
-            quant = load_mixed_precision_config(self.model_config.local_path)
-            if quant is None:
-                raise ValueError(f"mixed_precision_export: {self.model_config.local_path} is not MIXED_PRECISION")
-            self._mp_exporter = ModelOptMixedPrecisionExporter(self.model_config.local_path, quant)
+            self._mp_exporter = ModelOptMixedPrecisionExporter(self.model_config.local_path)
         return self._mp_exporter
 
     def _mcore_export_index(self):
