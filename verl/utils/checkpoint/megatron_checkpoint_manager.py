@@ -384,6 +384,22 @@ class MegatronCheckpointManager(BaseCheckpointManager):
             model_sharded_state_dict[key] = model.sharded_state_dict(metadata=model_metadata)
         return model_sharded_state_dict
 
+    def _pop_modelopt_extra_state(self, model_sd: dict) -> dict:
+        """Take ``_extra_state`` of a ModelOpt-quantized model from the live model, not the checkpoint.
+
+        The quantizers are rebuilt from the recipe at start-up, so the stored quantizer state is not
+        needed, and checkpoints written before the deployment scales left the quantizer attributes
+        carry them in every expert's ``_extra_state`` (tens of GiB of host memory per node to read).
+        """
+        modules = (m for model in self.model for m in model.modules())
+        if not any(hasattr(m, "modelopt_set_extra_state_callbacks") for m in modules):
+            return {}
+        live = {}
+        for key, sharded in model_sd.items():
+            live[key] = {k: v.data for k, v in sharded.items() if "_extra_state" in k}
+            model_sd[key] = {k: v for k, v in sharded.items() if k not in live[key]}
+        return live
+
     def _build_optimizer_state_dict(
         self,
         model_sharded_state_dict: dict,
@@ -907,10 +923,13 @@ class MegatronCheckpointManager(BaseCheckpointManager):
         # ── Load model weights ──────────────────────────────────────────────
         if self.should_load_dist_ckpt_model or (self.should_load_hf_model and self.peft_cls is not None):
             model_sd = self._maybe_filter_peft_state_dict(dict(model_sharded_state_dict))
+            live_extra_state = self._pop_modelopt_extra_state(model_sd)
             loaded_model = load_dist_checkpointing(
                 sharded_state_dict=model_sd,
                 ckpt_dir=model_dist_path,
             )
+            for key, extra_state in live_extra_state.items():
+                loaded_model[key].update(extra_state)
             assert "model" in loaded_model or any(
                 f"model{vpp_rank}" in loaded_model for vpp_rank in range(len(self.model))
             ), f"Model state dict not found in {loaded_model.keys()}. Please check the checkpoint file {local_path}."
