@@ -533,7 +533,7 @@ class MegatronEngine(BaseEngine):
         if self._qat_enabled and not self.engine_config.forward_only:
             from verl.utils.modelopt import apply_qat_to_modules
 
-            self.module = apply_qat_to_modules(self.module, self._qat_config)
+            self.module = apply_qat_to_modules(self.module, self._qat_config, deploy_path=self.model_config.local_path)
 
         self._maybe_enable_fused_kernels()
 
@@ -977,7 +977,9 @@ class MegatronEngine(BaseEngine):
         if getattr(self.bridge, "export_weight_dtype", None) == "fp8":
             return None
         if self._hf_export_tasks is None:
-            self._hf_export_tasks = self.bridge.get_conversion_tasks(self.module)
+            # ModelOpt quantizer buffers (_amax) have no HF mapping: Bridge leaves a None slot for each.
+            tasks = self.bridge.get_conversion_tasks(self.module)
+            self._hf_export_tasks = [task for task in tasks if task is not None]
         return self._hf_export_tasks
 
     def get_per_tensor_param(self, base_sync_done=False, **kwargs):
@@ -1015,9 +1017,15 @@ class MegatronEngine(BaseEngine):
 
     def _mixed_precision_exporter(self):
         if not hasattr(self, "_mp_exporter"):
-            from verl.utils.modelopt.mixed_precision_export import ModelOptMixedPrecisionExporter
+            from verl.utils.modelopt.mixed_precision_export import (
+                ModelOptMixedPrecisionExporter,
+                load_mixed_precision_config,
+            )
 
-            self._mp_exporter = ModelOptMixedPrecisionExporter(self.model_config.local_path)
+            quant = load_mixed_precision_config(self.model_config.local_path)
+            if quant is None:
+                raise ValueError(f"mixed_precision_export: {self.model_config.local_path} is not MIXED_PRECISION")
+            self._mp_exporter = ModelOptMixedPrecisionExporter(self.model_config.local_path, quant)
         return self._mp_exporter
 
     def _mcore_export_index(self):

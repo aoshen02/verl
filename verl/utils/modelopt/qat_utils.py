@@ -23,7 +23,7 @@ def _get_qat_field(qat_config, key, default=None):
     return getattr(qat_config, key, default)
 
 
-def apply_qat_to_modules(modules, qat_config):
+def apply_qat_to_modules(modules, qat_config, deploy_path=None):
     """Apply ModelOpt fake quantization to a list of Megatron module chunks."""
     from verl.utils.modelopt.quantize import apply_qat
 
@@ -33,7 +33,7 @@ def apply_qat_to_modules(modules, qat_config):
         ignore_patterns = list(ignore_patterns)
 
     for i in range(len(modules)):
-        modules[i] = apply_qat(modules[i], qat_mode, ignore_patterns=ignore_patterns)
+        modules[i] = apply_qat(modules[i], qat_mode, ignore_patterns=ignore_patterns, deploy_path=deploy_path)
     return modules
 
 

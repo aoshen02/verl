@@ -243,8 +243,8 @@ class McoreEngineConfig(EngineConfig):
             # Megatron uses the tensor parallel size for experts when theirs is unset.
             expert_tp = self.expert_tensor_parallel_size or self.tensor_model_parallel_size
             if self.qat.get("mode") == "modelopt_mixed" and (self.tensor_model_parallel_size != 1 or expert_tp != 1):
-                # The QAT forward quantizes each rank's shard, the exporter the full
-                # tensor; their scales differ once a weight is split.
+                # The static scales are calibrated on each rank's shard, the exporter
+                # quantizes the full tensor (ModelOpt rejects static NVFP4 with TP > 1 too).
                 raise ValueError(
                     "qat.mode=modelopt_mixed requires tensor_model_parallel_size=1 and "
                     f"expert_tensor_parallel_size=1, got {self.tensor_model_parallel_size} and {expert_tp}"
