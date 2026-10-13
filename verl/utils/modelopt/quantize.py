@@ -192,6 +192,10 @@ def apply_mixed_precision_qat(model: nn.Module) -> nn.Module:
         quantizer = getattr(module, "weight_quantizer", None)
         if not isinstance(quantizer, TensorQuantizer) or not quantizer.is_enabled:
             continue
+        if module_name.startswith("mtp.") or ".mtp." in module_name:
+            # The checkpoint's MTP block is BF16; the drafter serves it unquantized.
+            quantizer.disable()
+            continue
         if isinstance(module, _QuantTEGroupedLinear) and not isinstance(module, weight_only_grouped_classes):
             raise RuntimeError(f"{module_name}: {type(module).__name__} has no weight-only grouped quant module")
         name = f"{module_name}.weight_quantizer"
