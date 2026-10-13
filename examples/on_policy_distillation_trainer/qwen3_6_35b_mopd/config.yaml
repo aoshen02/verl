@@ -1,0 +1,187 @@
+# Upstream's synchronous MOPD loss and resource pools, with example-local telemetry.
+defaults:
+  - /ppo_trainer
+  - _self_
+
+hydra:
+  searchpath:
+    - pkg://verl.trainer.config
+
+data:
+  train_files: ${oc.env:MOPD_DATA}/train.parquet
+  val_files:
+    - ${oc.env:MOPD_DATA}/caesar_cipher-dev.parquet
+    - ${oc.env:MOPD_DATA}/simple_geometry-dev.parquet
+  train_batch_size: 128
+  gen_batch_size: 128
+  max_prompt_length: 2048
+  max_response_length: 30720
+  filter_overlong_prompts: false
+  truncation: error
+  shuffle: false
+  apply_chat_template_kwargs:
+    enable_thinking: true
+
+algorithm:
+  adv_estimator: grpo
+  use_kl_in_reward: false
+
+actor_rollout_ref:
+  model:
+    path: ${oc.env:STUDENT_MODEL}
+    enable_gradient_checkpointing: true
+    use_remove_padding: true
+  actor:
+    strategy: fsdp2
+    freeze_vision_tower: true
+    ppo_mini_batch_size: 128
+    ppo_micro_batch_size_per_gpu: 1
+    ppo_epochs: 1
+    use_dynamic_bsz: true
+    ppo_max_token_len_per_gpu: 32768
+    use_kl_loss: false
+    entropy_coeff: 0
+    optim:
+      lr: 1.0e-6
+      weight_decay: 0.0
+      betas: [0.9, 0.999]
+    fsdp_config:
+      fsdp_size: 8
+      param_offload: true
+      optimizer_offload: true
+      reshard_after_forward: true
+      ulysses_sequence_parallel_size: 1
+      use_torch_compile: false
+      entropy_from_logits_with_chunking: true
+      entropy_from_logits_chunk_size: 4096
+  rollout:
+    name: vllm
+    tensor_model_parallel_size: 2
+    gpu_memory_utilization: 0.6
+    n: 1
+    temperature: 1.0
+    top_p: 1.0
+    top_k: -1
+    max_model_len: 32769
+    max_num_batched_tokens: 8192
+    max_num_seqs: 128
+    enable_chunked_prefill: true
+    enable_prefix_caching: false
+    calculate_log_probs: true
+    log_prob_use_dynamic_bsz: true
+    log_prob_max_token_len_per_gpu: 32768
+    val_kwargs:
+      n: 4
+      do_sample: true
+      temperature: 1.0
+      top_p: 1.0
+      top_k: -1
+    agent:
+      num_workers: 8
+      agent_loop_manager_class: examples.on_policy_distillation_trainer.qwen3_6_35b_mopd.metrics.runtime.MeasuredAgentLoopManager
+
+distillation:
+  enabled: true
+  nnodes: 1
+  n_gpus_per_node: 8
+  teacher_key: data_source
+  teacher_models:
+    caesar:
+      key: caesar_cipher
+      model_path: ${oc.env:CAESAR_TEACHER_MODEL}
+      num_replicas: 1
+      inference:
+        engine_kwargs:
+          vllm:
+            worker_cls: examples.on_policy_distillation_trainer.qwen3_6_35b_mopd.metrics.teacher_timing.CaesarTeacherWorker
+        name: vllm
+        load_format: auto
+        tensor_model_parallel_size: 4
+        gpu_memory_utilization: 0.8
+        max_model_len: 32769
+        prompt_length: 2048
+        response_length: 30720
+        max_num_batched_tokens: 8192
+        max_num_seqs: 128
+        enable_chunked_prefill: true
+        enable_prefix_caching: false
+        enforce_eager: true
+    geometry:
+      key: simple_geometry
+      model_path: ${oc.env:GEOMETRY_TEACHER_MODEL}
+      num_replicas: 1
+      inference:
+        engine_kwargs:
+          vllm:
+            worker_cls: examples.on_policy_distillation_trainer.qwen3_6_35b_mopd.metrics.teacher_timing.GeometryTeacherWorker
+        name: vllm
+        load_format: auto
+        tensor_model_parallel_size: 4
+        gpu_memory_utilization: 0.8
+        max_model_len: 32769
+        prompt_length: 2048
+        response_length: 30720
+        max_num_batched_tokens: 8192
+        max_num_seqs: 128
+        enable_chunked_prefill: true
+        enable_prefix_caching: false
+        enforce_eager: true
+  distillation_loss:
+    loss_mode: k1
+    topk: 64
+    use_task_rewards: false
+    use_policy_gradient: true
+    loss_max_clamp: 10.0
+    log_prob_min_clamp: -10.0
+
+reward:
+  custom_reward_function:
+    path: ${oc.env:VERL_ROOT}/examples/on_policy_distillation_trainer/qwen3_6_35b_mopd/reward.py
+    name: compute_score
+
+trainer:
+  use_v1: true
+  v1:
+    trainer_mode: sync
+  nnodes: 1
+  n_gpus_per_node: 8
+  logger: [console, file]
+  project_name: qwen3_6_mopd
+  experiment_name: ${oc.env:MOPD_RUN_NAME,qwen3_6_35b_two_teachers}
+  default_local_dir: ${oc.env:MOPD_OUTPUT}/checkpoints
+  validation_data_dir: ${oc.env:MOPD_OUTPUT}/validation
+  val_before_train: true
+  total_training_steps: 20
+  total_epochs: 1
+  save_freq: 10
+  test_freq: 10
+  resume_mode: disable
+
+ray_kwargs:
+  ray_init:
+    address: auto
+    runtime_env:
+      py_executable: null
+      env_vars:
+        MOPD_OUTPUT: ${oc.env:MOPD_OUTPUT}
+
+# Example-only settings, never interpreted as model-engine settings.
+measurement:
+  output_dir: ${oc.env:MOPD_OUTPUT}
+  allocated_gpus: 16
+  bf16_peak_tflops_per_gpu: 2250.0
+  teacher_baselines: ${oc.env:MOPD_TEACHER_BASELINES,""}
+  # Published avg@4 references; student evaluation uses the same sampling settings.
+  teacher_references:
+    caesar_cipher:
+      avg_at_4: 0.733
+      temperature: 1.0
+      samples_per_prompt: 4
+      checkpoint_step: 125
+      source: https://huggingface.co/semianalysisai/Qwen3.6-35B-A3B-caesar-cipher-GRPO-20260924#held-out-eval
+    simple_geometry:
+      avg_at_4: 0.998
+      temperature: 1.0
+      samples_per_prompt: 4
+      checkpoint_step: 50
+      source: https://huggingface.co/semianalysisai/Qwen3.6-35B-A3B-simple-geometry-GRPO-20260925#held-out-eval
