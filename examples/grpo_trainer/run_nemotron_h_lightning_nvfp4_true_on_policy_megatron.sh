@@ -620,7 +620,7 @@ HYDRA_ARGS=(
   # Model and shared actor settings.
   actor_rollout_ref.model.path="${MODEL_PATH}"
   actor_rollout_ref.actor.optim.weight_decay=0.1
-  actor_rollout_ref.actor.optim.betas='[0.9,0.95]'
+  actor_rollout_ref.actor.optim.betas="${ACTOR_BETAS:-[0.9,0.999]}"
   actor_rollout_ref.actor.optim.lr="${ACTOR_LR}"
   actor_rollout_ref.actor.optim.lr_warmup_steps=0
   actor_rollout_ref.actor.ppo_mini_batch_size="${PPO_MINI_BATCH_SIZE}"
