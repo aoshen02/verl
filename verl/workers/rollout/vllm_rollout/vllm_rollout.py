@@ -237,6 +237,7 @@ class ServerAdapter(BaseRollout):
             zmq_handle=self.zmq_handle,
             bucket_size_mb=bucket_size_mb,
             use_shm=self.use_shm,
+            double_buffer=os.environ.get("VERL_WEIGHT_SYNC_DOUBLE_BUFFER", "0") == "1",
         )
         await sender.async_send_weights(weights)
 

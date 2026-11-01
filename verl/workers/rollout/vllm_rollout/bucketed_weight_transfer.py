@@ -81,6 +81,8 @@ class BucketedWeightSender:
         zmq_handle: ZMQ IPC socket path (e.g., "ipc:///tmp/rl-colocate-zmq-<uuid>.sock")
         bucket_size_mb: Communication buffer size in MB
         use_shm: Use shared memory instead of CUDA IPC (for NPU compatibility)
+        double_buffer: Allocate two CUDA IPC buffers so the receiver loads one bucket
+            while the next one is packed into the other. Ignored with ``use_shm``.
     """
 
     def __init__(
@@ -88,15 +90,18 @@ class BucketedWeightSender:
         zmq_handle: str,
         bucket_size_mb: int = 512,
         use_shm: bool = False,
+        double_buffer: bool = False,
     ):
         self.zmq_handle = zmq_handle
         self.bucket_size_mb = bucket_size_mb
         self.bucket_size = int(bucket_size_mb) << 20
         self.use_shm = use_shm
+        self.double_buffer = double_buffer and not use_shm
 
         self.zmq_context = zmq.Context.instance()
         self.socket = None
         self.buffer = None
+        self.buffers = []
         self.shm = None
 
     async def async_send_weights(self, weights):
@@ -111,6 +116,9 @@ class BucketedWeightSender:
         try:
             self._init_socket()
             self._init_buffer()
+            # With double buffering one bucket stays in flight: its ack is collected
+            # only before the next send, after the other buffer has been filled.
+            cur, pending = 0, False
 
             # send bucket weights
             offset = 0
@@ -132,8 +140,14 @@ class BucketedWeightSender:
                 # fill the tensor bucket
                 if offset + weight.nbytes > self.bucket_size and len(bucket_meta) > 0:
                     get_torch_device().synchronize()
-                    self.socket.send_pyobj({"bucket_meta": bucket_meta, "is_last": False})
-                    self.socket.recv()
+                    if pending:
+                        self.socket.recv()
+                    self.socket.send_pyobj(self._bucket_message(bucket_meta, is_last=False, buf=cur))
+                    if self.double_buffer:
+                        pending, cur = True, cur ^ 1
+                        self.buffer = self.buffers[cur]
+                    else:
+                        self.socket.recv()
                     bucket_meta = {}
                     offset = 0
 
@@ -142,6 +156,9 @@ class BucketedWeightSender:
                         f"Weight {name}({weight.shape}, {weight.dtype}) is too large to fit in the bucket."
                         f"Please increase rollout.update_weights_bucket_megabytes({self.bucket_size_mb} MB)."
                     )
+                    if pending:
+                        self.socket.recv()
+                        pending = False
                     self._direct_send_large_weight(name, weight)
                     continue
 
@@ -160,10 +177,18 @@ class BucketedWeightSender:
             # send the last bucket
             name = weight = None
             get_torch_device().synchronize()
-            self.socket.send_pyobj({"bucket_meta": bucket_meta, "is_last": True})
+            if pending:
+                self.socket.recv()
+            self.socket.send_pyobj(self._bucket_message(bucket_meta, is_last=True, buf=cur))
             self.socket.recv()
         finally:
             self._cleanup()
+
+    def _bucket_message(self, bucket_meta: dict[str, TensorMetadata], is_last: bool, buf: int) -> dict:
+        message = {"bucket_meta": bucket_meta, "is_last": is_last}
+        if self.double_buffer:
+            message["buf"] = buf
+        return message
 
     def _init_socket(self):
         """Initialize ZMQ REQ socket and bind."""
@@ -180,9 +205,15 @@ class BucketedWeightSender:
         """build communication buffer"""
         buffer, shm = None, None
         if not self.use_shm:
-            buffer = torch.empty(self.bucket_size, dtype=torch.uint8, device=f"{get_device_name()}:{get_device_id()}")
-            handle = reduce_tensor(buffer)
-            self.socket.send_pyobj(handle)
+            device = f"{get_device_name()}:{get_device_id()}"
+            self.buffers = [
+                torch.empty(self.bucket_size, dtype=torch.uint8, device=device)
+                for _ in range(2 if self.double_buffer else 1)
+            ]
+            buffer = self.buffers[0]
+            handles = [reduce_tensor(b) for b in self.buffers]
+            # A single handle keeps the wire format of single-buffer senders.
+            self.socket.send_pyobj(handles if self.double_buffer else handles[0])
         else:
             import uuid
 
@@ -211,6 +242,7 @@ class BucketedWeightSender:
                 pass
         del self.buffer
         self.buffer = None
+        self.buffers = []
         if self.shm is not None:
             self.shm.close()
             self.shm.unlink()
@@ -263,6 +295,7 @@ class BucketedWeightReceiver:
         self.zmq_context = zmq.Context.instance()
         self.socket = None
         self.buffer = None
+        self.buffers = []
         self.shm = None
         self._ack_pending = False
 
@@ -284,6 +317,7 @@ class BucketedWeightReceiver:
             # receive bucket and update weights
             while True:
                 metadata = self.socket.recv_pyobj()
+                buffer = self.buffers[metadata.get("buf", 0)]
                 weights, tensor = [], None
                 for name, meta in metadata["bucket_meta"].items():
                     shape, dtype, offset, handle = meta["shape"], meta["dtype"], meta["offset"], meta["handle"]
@@ -292,14 +326,14 @@ class BucketedWeightReceiver:
                         weights.append((name, tensor))
                         continue
                     size = dtype.itemsize * shape.numel()
-                    tensor = self.buffer[offset : offset + size].view(dtype=dtype).view(shape)
+                    tensor = buffer[offset : offset + size].view(dtype=dtype).view(shape)
                     if self.use_shm:
                         tensor = tensor.to(self.device)
                     weights.append((name, tensor))
                 is_last = metadata["is_last"]
                 on_bucket_received(weights, is_last)
                 get_torch_device().synchronize()
-                del weights, tensor
+                del weights, tensor, buffer
                 if not is_last:
                     self.socket.send(b"")
                 else:
@@ -318,13 +352,15 @@ class BucketedWeightReceiver:
         comm_metadata = self.socket.recv_pyobj()
         buffer, shm = None, None
         if not self.use_shm:
-            handle = comm_metadata
-            buffer = rebuild_ipc(handle, self.device.index)
+            handles = comm_metadata if isinstance(comm_metadata, list) else [comm_metadata]
+            self.buffers = [rebuild_ipc(handle, self.device.index) for handle in handles]
+            buffer = self.buffers[0]
             assert buffer.dtype == torch.uint8
         else:
             shm_name = comm_metadata["name"]
             shm_size = comm_metadata["size"]
             buffer, shm = rebuild_shared_memory(shm_name, shm_size, dtype=torch.uint8)
+            self.buffers = [buffer]
         self.socket.send(b"")
         self.buffer = buffer
         self.shm = shm
@@ -336,6 +372,7 @@ class BucketedWeightReceiver:
         get_torch_device().synchronize()
         del self.buffer
         self.buffer = None
+        self.buffers = []
         if self.shm is not None:
             self.shm.close()
             del self.shm
