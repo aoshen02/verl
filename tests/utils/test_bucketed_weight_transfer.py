@@ -119,10 +119,62 @@ def test_sender_accepts_strided_tensor(monkeypatch):
     assert torch.equal(recovered, weight)
 
 
+class _RecordingSocket:
+    """Records the send/recv order and a copy of the bucket each send points at."""
+
+    def __init__(self, sender):
+        self.sender = sender
+        self.ops = []
+        self.sent = []
+
+    def send_pyobj(self, message):
+        self.ops.append("send")
+        buf = self.sender.buffers[message.get("buf", 0)]
+        self.sent.append((message, buf.clone()))
+
+    def recv(self):
+        self.ops.append("recv")
+        return b""
+
+
+def test_double_buffer_keeps_one_bucket_in_flight(monkeypatch):
+    """Each bucket is acked before its buffer is refilled, and buckets alternate buffers."""
+    from verl.workers.rollout.vllm_rollout import bucketed_weight_transfer
+
+    bucket_bytes = 1 << 20
+    # Three weights of 3/4 bucket each: one bucket per weight.
+    weights = [(f"w{i}", torch.full(((3 * bucket_bytes) // 16,), float(i))) for i in range(3)]
+    sender = bucketed_weight_transfer.BucketedWeightSender(
+        zmq_handle="ipc:///tmp/test-bwt-unused.sock",
+        bucket_size_mb=1,
+        double_buffer=True,
+    )
+    socket = _RecordingSocket(sender)
+
+    def init_buffer():
+        sender.buffers = [torch.empty(bucket_bytes, dtype=torch.uint8) for _ in range(2)]
+        sender.buffer = sender.buffers[0]
+
+    monkeypatch.setattr(sender, "_init_socket", lambda: setattr(sender, "socket", socket))
+    monkeypatch.setattr(sender, "_init_buffer", init_buffer)
+    monkeypatch.setattr(sender, "_cleanup", lambda: None)
+    monkeypatch.setattr(bucketed_weight_transfer, "get_torch_device", lambda: _FakeTorchDevice())
+
+    asyncio.run(sender.async_send_weights(iter(weights)))
+
+    assert socket.ops == ["send", "recv", "send", "recv", "send", "recv"]
+    assert [message["buf"] for message, _ in socket.sent] == [0, 1, 0]
+    assert [message["is_last"] for message, _ in socket.sent] == [False, False, True]
+    for (message, buf), (name, weight) in zip(socket.sent, weights, strict=True):
+        meta = message["bucket_meta"][name]
+        recovered = buf[meta["offset"] : meta["offset"] + weight.nbytes].view(weight.dtype)
+        assert torch.equal(recovered, weight)
+
+
 # ---------------------------------------------------------------------------
 # Process entry points (must be module-level for pickling with spawn)
 # ---------------------------------------------------------------------------
-def _sender_fn(zmq_handle, weight_specs, seed, bucket_size_mb, use_shm):
+def _sender_fn(zmq_handle, weight_specs, seed, bucket_size_mb, use_shm, double_buffer=False):
     """Sender process: generate weights, move to device, send."""
     from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedWeightSender
 
@@ -131,6 +183,7 @@ def _sender_fn(zmq_handle, weight_specs, seed, bucket_size_mb, use_shm):
         zmq_handle=zmq_handle,
         bucket_size_mb=bucket_size_mb,
         use_shm=use_shm,
+        double_buffer=double_buffer,
     )
     asyncio.run(sender.async_send_weights(iter(weights)))
 
@@ -158,7 +211,7 @@ def _receiver_fn(zmq_handle, use_shm, result_queue):
 # ---------------------------------------------------------------------------
 # Test helper
 # ---------------------------------------------------------------------------
-def _transfer_and_validate(weight_specs, bucket_size_mb, use_shm):
+def _transfer_and_validate(weight_specs, bucket_size_mb, use_shm, double_buffer=False):
     """Spawn sender + receiver processes, then validate received tensors."""
     zmq_handle = _unique_zmq_handle()
     seed = 42
@@ -167,7 +220,7 @@ def _transfer_and_validate(weight_specs, bucket_size_mb, use_shm):
 
     sender_p = ctx.Process(
         target=_sender_fn,
-        args=(zmq_handle, weight_specs, seed, bucket_size_mb, use_shm),
+        args=(zmq_handle, weight_specs, seed, bucket_size_mb, use_shm, double_buffer),
     )
     receiver_p = ctx.Process(
         target=_receiver_fn,
@@ -292,3 +345,22 @@ class TestBucketedWeightTransferIPC:
         specs.append(("lm_head", (1024, 1024), torch.float32))  # 4MB
 
         _transfer_and_validate(specs, bucket_size_mb=1, use_shm=False)
+
+
+@pytest.mark.skipif(not is_support_ipc(), reason="Requires IPC support")
+class TestBucketedWeightTransferIPCDoubleBuffer:
+    """Same transfers as TestBucketedWeightTransferIPC with two alternating buffers."""
+
+    def test_multiple_buckets(self):
+        specs = [(f"layer{i}.weight", (128, 128), torch.float32) for i in range(20)]
+        _transfer_and_validate(specs, bucket_size_mb=1, use_shm=False, double_buffer=True)
+
+    def test_empty_weights(self):
+        _transfer_and_validate([], bucket_size_mb=1, use_shm=False, double_buffer=True)
+
+    def test_large_weight(self):
+        specs = [("embedding", (1024, 1024), torch.float32)]  # 4MB
+        specs.extend([(f"layer{i}.weight", (128, 128), torch.float32) for i in range(20)])
+        specs.append(("gate_up_proj", (1024, 1024), torch.float32))  # 4MB
+        specs.extend([(f"layer{i}.weight", (128,), torch.bfloat16) for i in range(20)])
+        _transfer_and_validate(specs, bucket_size_mb=1, use_shm=False, double_buffer=True)
