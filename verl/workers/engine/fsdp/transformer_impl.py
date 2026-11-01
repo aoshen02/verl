@@ -1030,13 +1030,20 @@ class FSDPEngine(BaseEngine):
             per_tensor_param = params.items()
         else:
             device = get_device_id()  # used when fsdp2 set cpu_offload_policy
-            per_tensor_param = (
-                (
-                    name,
-                    param.to(device, non_blocking=True).full_tensor() if isinstance(param, DTensor) else param,
-                )
-                for name, param in params.items()
-            )
+            # A bf16 rollout rounds fp32 weight matrices the same way when it loads them, so casting the
+            # local shard before the all-gather halves the gather/IPC/load bytes without changing the
+            # result. 1-D params (norms, biases, A_log) stay fp32 in case the rollout keeps them fp32.
+            cast_bf16 = os.environ.get("VERL_WEIGHT_SYNC_BF16", "0") == "1"
+
+            def _full_tensor(param):
+                if not isinstance(param, DTensor):
+                    return param
+                param = param.to(device, non_blocking=True)
+                if cast_bf16 and param.dtype == torch.float32 and param.dim() >= 2:
+                    param = param.to(torch.bfloat16)
+                return param.full_tensor()
+
+            per_tensor_param = ((name, _full_tensor(param)) for name, param in params.items())
             per_tensor_param = unfuse_moe_params(per_tensor_param, self.model_config.hf_config.model_type)
 
         if self._qat_enabled:
