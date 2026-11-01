@@ -1044,7 +1044,11 @@ class FSDPEngine(BaseEngine):
                 return param.full_tensor()
 
             per_tensor_param = ((name, _full_tensor(param)) for name, param in params.items())
-            per_tensor_param = unfuse_moe_params(per_tensor_param, self.model_config.hf_config.model_type)
+            # vLLM's RoutedExperts.load_weights also takes the packed [num_experts, ...] tensors.
+            # Splitting them yields a contiguous copy and a bucket entry per expert (~30k tensors for
+            # Qwen3.6-35B-A3B), which dominates the sync time.
+            if os.environ.get("VERL_WEIGHT_SYNC_PACKED_MOE", "0") != "1":
+                per_tensor_param = unfuse_moe_params(per_tensor_param, self.model_config.hf_config.model_type)
 
         if self._qat_enabled:
             from verl.utils.qat.quantizer import QATQuantizer
