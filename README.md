@@ -170,9 +170,9 @@ verl is fast with:
 
 The performance is essential for on-policy RL algorithm. We have written a detailed [performance tuning guide](https://verl.readthedocs.io/en/latest/perf/perf_tuning.html) to help you optimize performance.
 
-## Upgrade to vLLM >= v0.8.2
+## Upgrade to vLLM >= v0.34
 
-verl now supports vLLM>=0.8.2 when using FSDP as the training backend. Please refer to [this document](https://github.com/verl-project/verl/blob/main/docs/README_vllm0.8.md) for the installation guide and more information. Please avoid vllm 0.7.x, which contains bugs that may lead to OOMs and unexpected errors.
+verl locks vLLM 0.34.0 and refits rollout weights through vLLM's reload lifecycle (`start_reload` / `finish_reload`), which needs vLLM>=0.34 on non-NPU devices. Please refer to the [installation guide](https://verl.readthedocs.io/en/latest/start/install.html) for the environment; [README_vllm0.8.md](https://github.com/verl-project/verl/blob/main/docs/README_vllm0.8.md) describes the legacy 0.8 setup.
 
 ## Use Latest SGLang
 

@@ -1,6 +1,6 @@
 # Recipe: Decoupled Clip and Dynamic Sampling Policy Optimization (DAPO)
 
-Last updated: 06/19/2025.
+Last updated: 11/20/2026.
 
 > Open-Source Algorithm Implementation & Expriement Running: [Yuxuan Tong](https://tongyx361.github.io/), [Guangming Sheng](https://hk.linkedin.com/in/guangming-sheng-b50640211)
 
@@ -184,4 +184,4 @@ We strongly recommend to only modify one thing at a time.
 
 We also list some known problems here:
 
-1. Enabling CUDA graph (`enforce_eager=False`) might cause model performance degradation, whose cause is still under investigation.
+1. Enabling CUDA graph (`enforce_eager=False`) was reported to degrade model performance with the vLLM versions of the original recipe; the cause was never identified. CUDA graphs are now enabled by default (`enforce_eager=False`), and weight sync and sleep with vLLM do not require disabling them.

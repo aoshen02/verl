@@ -1,7 +1,7 @@
 Performance Tuning Guide
 ==============================
 
-Last updated: 10/22/2026.
+Last updated: 11/20/2026.
 
 Author: `Guangming Sheng <https://github.com/PeterSH6>`_, `Jiali Zheng <https://github.com/CurryRice233>`_
 
@@ -59,7 +59,7 @@ Below are key factors for tuning vLLM-based rollout. Before tuning, we recommend
   If ``cudagraph_capture_sizes`` is set, vLLM will try to capture the model execution graph for different batch sizes.
   Since cudagraph memory can not be offloaded to cpu, The memory stay in gpu when update actor is running. 
   Using smaller batch sizes can avoid OOM but slightly reduce throughput.
-  Must to set ``enforce_eager=False`` to use ``cudagraph_capture_sizes``.
+  Requires ``enforce_eager=False`` (the default) to use ``cudagraph_capture_sizes``.
 
 More tuning details such as dealing with Preemption and Chunked-prefill
 can be found in `vLLM official tuning guide <https://docs.vllm.ai/en/latest/configuration/optimization/>`_ 

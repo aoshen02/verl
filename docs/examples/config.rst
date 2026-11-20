@@ -3,7 +3,7 @@
 Config Explanation
 ===================
 
-Last updated: 11/02/2026.
+Last updated: 11/20/2026.
 
 ppo_trainer.yaml for RL FSDP Backend
 -------------------------------------
@@ -221,7 +221,7 @@ Actor/Rollout/Reference Policy
       dtype: bfloat16 # should align with FSDP
       gpu_memory_utilization: 0.5
       ignore_eos: False
-      enforce_eager: True
+      enforce_eager: False
       free_cache_engine: True
       load_format: dummy_dtensor
       tensor_model_parallel_size: 2
@@ -458,12 +458,12 @@ Reference model will be enabled when ``actor.use_kl_loss`` or/and ``algorithm.us
   token and continue generating tokens after the EOS token is generated.
 
 - ``actor_rollout_ref.rollout.free_cache_engine``: Offload the KVCache
-  after rollout generation stage. Default is True. When set to True,
-  for vllm v0.5.4 and v0.6.3, we need to disable the usage of CUDAGraph
-  (set ``enforce_eager`` to True.)
+  after rollout generation stage. Default is True. CUDA graphs can stay
+  enabled with it.
 
-- ``actor_rollout_ref.rollout.enforce_eager``: Whether to use CUDAGraph
-  in vLLM generation. Default set to True to disable CUDAGraph.
+- ``actor_rollout_ref.rollout.enforce_eager``: Whether to disable CUDAGraph
+  in vLLM generation. Default is False (CUDAGraph enabled); weight sync and
+  sleep do not require disabling it.
 
 - ``actor_rollout_ref.rollout.load_format``: Which weight loader to use
   to load the actor model weights to the rollout model.
