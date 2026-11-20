@@ -262,9 +262,9 @@ SGLang uses the default CUDA Graph configuration):
 |---|---|---|---|---|---|
 | Hopper | vLLM | ✅ | BF16 | - | 0.00031 |
 | Hopper | SGLang | ✅ | BF16 | - | 0.00031 |
-| Hopper | vLLM | ✅ | FP8_BLOCK | DeepGEMM | 0.00225 |
+| Hopper | vLLM | ✅ | FP8_BLOCK | DeepGEMM | 0.00222 |
 | Hopper | SGLang | ✅ | FP8_BLOCK | DeepGEMM | 0.00231 |
-| Hopper | vLLM | ✅ | FP8_BLOCK + FP8 QAT | DeepGEMM | 0.00187 |
+| Hopper | vLLM | ✅ | FP8_BLOCK + FP8 QAT | DeepGEMM | 0.00185 |
 | Hopper | SGLang | ✅ | FP8_BLOCK + FP8 QAT | DeepGEMM | 0.00188 |
 | Blackwell | vLLM | ❌ | MXFP8 linear + MoE | FlashInfer CuteDSL / DeepGEMM | 0.00387 |
 | Blackwell | vLLM | ❌ | MXFP8 linear + MoE + MXFP8 QAT | FlashInfer CuteDSL / DeepGEMM | 0.00325 |
@@ -275,7 +275,7 @@ SGLang uses the default CUDA Graph configuration):
 | Blackwell | SGLang | ❌ | MXFP4 MoE | DeepGEMM (MoE; BF16 Linear) | 0.00571 |
 | Blackwell | SGLang | ❌ | MXFP4 MoE + MXFP4 QAT | DeepGEMM (MoE; BF16 Linear) | 0.00200 |
 | Blackwell | vLLM | ❌ | NVFP4 MoE | FlashInfer TRT-LLM (MoE; BF16 Linear) | 0.00966 |
-| Blackwell | vLLM | ❌ | NVFP4 MoE + NVFP4 QAT | FlashInfer TRT-LLM (MoE; BF16 Linear) | 0.00766 |
+| Blackwell | vLLM | ❌ | NVFP4 MoE + NVFP4 QAT | FlashInfer TRT-LLM (MoE; BF16 Linear) | 0.00778 |
 
 ## Limitations
 
