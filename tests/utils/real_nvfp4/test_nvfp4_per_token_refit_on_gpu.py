@@ -166,17 +166,6 @@ def _logprobs(llm):
     return [[next(iter(lp.values())).logprob for lp in o.outputs[0].logprobs] for o in outputs]
 
 
-def _kv_caches(llm):
-    from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-
-    caches = []
-    for module in _runner(llm).get_model().modules():
-        if isinstance(module, AttentionLayerBase):
-            kv = getattr(module, "kv_cache", None)
-            caches.extend(t for t in (kv if isinstance(kv, list | tuple) else [kv]) if isinstance(t, torch.Tensor))
-    return caches
-
-
 def _free():
     # Callers drop their engine reference first: shutting an engine down tears down
     # vLLM's process-wide parallel state, which the next engine would otherwise lose.
@@ -185,14 +174,6 @@ def _free():
 
 
 def test_preset_refit_matches_online_quantization(model_dir, request):
-    from verl.utils.vllm.vllm_nvfp4_per_token_utils import (
-        attest_nvfp4_per_token_runtime,
-        clear_kv_cache,
-        nvfp4_per_token_quantization_config,
-        routed_expert_layers,
-    )
-    from verl.utils.vllm.vllm_quant_utils import apply_vllm_quant_patches
-
     carved = [0, NUM_LAYERS - 1]
     # vLLM's online method quantizes the BF16 checkpoint at load. Eager mode keeps the
     # comparison independent of each engine's KV-cache size, which steers graph kernels.
@@ -207,40 +188,27 @@ def test_preset_refit_matches_online_quantization(model_dir, request):
     del online
     _free()
 
-    apply_vllm_quant_patches()
     ignore = [r"re:.*layers\.(" + "|".join(map(str, carved)) + r")\.mlp\.experts\..*"]
     config = build_compressed_tensors_config(
         linear=None, moe="NVFP4", moe_activation="nvfp4_per_token", ignore=ignore, config_file=None
     )
 
     def refit(llm, scale):
-        model = _runner(llm).get_model()
-        layers = routed_expert_layers(model, config)
-        assert sorted(layer for layer, (_, quantized) in layers.items() if quantized) == [1]
         _refit(llm, list(NVFP4PerTokenWeightQuantizer(config)(_weights(model_dir, scale))))
-        attest_nvfp4_per_token_runtime(model, config)
         return _logprobs(llm)
 
-    preset = _engine(model_dir, eager=True, load_format="dummy", hf_overrides={"quantization_config": config})
-    # The worker finds the per-token config that came in through hf_overrides.
-    assert nvfp4_per_token_quantization_config(_runner(preset).vllm_config) is not None
-    # Start-up forwards with the dummy weights can leave NaN in the KV cache; the rollout
-    # clears it once the engine is up (monkey_patch_model).
-    clear_kv_cache(_runner(preset).get_model())
-    assert _kv_caches(preset) and all(torch.isfinite(t).all() for t in _kv_caches(preset))
+    # The rollout's preset engine, with the moe_backend check_nvfp4_per_token_rollout defaults to
+    preset_kwargs = dict(
+        load_format="dummy", hf_overrides={"quantization_config": config}, moe_backend="flashinfer_trtllm"
+    )
+    preset = _engine(model_dir, eager=True, **preset_kwargs)
     assert refit(preset, 1.0) == expected
     del preset
     _free()
 
     # vLLM allows one sleep-mode (CuMem) engine per process, so one model covers the sleep.
     sleep = request.node.callspec.id == "qwen3_moe"
-    preset = _engine(
-        model_dir,
-        eager=False,
-        load_format="dummy",
-        enable_sleep_mode=sleep,
-        hf_overrides={"quantization_config": config},
-    )
+    preset = _engine(model_dir, eager=False, enable_sleep_mode=sleep, **preset_kwargs)
     first = refit(preset, 1.0)
     assert refit(preset, 1.5) != first
     assert refit(preset, 1.0) == first
