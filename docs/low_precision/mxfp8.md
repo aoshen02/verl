@@ -1,6 +1,6 @@
 # MXFP8 RL on Blackwell
 
-Last updated: 10/22/2026
+Last updated: 11/20/2026
 
 MXFP8 is the OCP microscaling FP8 format: E4M3 elements with one E8M0 scale per 32-element block,
 decoded natively by Blackwell tensor cores. This recipe trains with Transformer Engine's MXFP8 recipe and
@@ -15,7 +15,7 @@ interface shared by all formats, and the vLLM and SGLang specifics, are describe
 
 - Blackwell GPUs (SM100+)
 - Training: Megatron-Core >= 0.13 and Transformer Engine >= 2.1, on the Megatron-Bridge model path
-- Rollout: vLLM 0.29 or SGLang 0.5.20 (the versions verl locks)
+- Rollout: vLLM 0.34 or SGLang 0.5.20 (the versions verl locks)
 
 ## Configuration
 

@@ -25,25 +25,13 @@ from types import MethodType
 from typing import Any, Literal, Optional, get_args
 
 import torch
+from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
 
 from verl.utils.device import get_device_name, is_npu_available
-from verl.utils.vllm import TensorLoRARequest, VLLMHijack, resolve_weight_name
-from verl.utils.vllm.patch import patch_vllm_moe_model_weight_loader
-from verl.utils.vllm.rocm_vllm_moe_expert_map import restore_moe_expert_maps
-from verl.utils.vllm.vllm_quant_utils import (
-    apply_vllm_quant_patches,
-    configure_fp8_ignored_layers_match_mode,
-    is_quantized_model,
-    refresh_rocm_attention_weight_caches,
-    reset_uncalibrated_kv_cache_scales,
-)
+from verl.utils.vllm import TensorLoRARequest, VLLMHijack
 from verl.workers.rollout.vllm_rollout.bucketed_weight_transfer import BucketedWeightReceiver
-from verl.workers.rollout.vllm_rollout.weight_update_utils import (
-    apply_buffer_updates,
-    drop_tied_alias_updates,
-    split_buffer_updates,
-)
+from verl.workers.rollout.vllm_rollout.weight_update_utils import apply_buffer_updates, split_buffer_updates
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
@@ -116,7 +104,7 @@ def get_vllm_max_lora_rank(lora_rank: int):
 
 # https://github.com/vllm-project/vllm/issues/13175
 def monkey_patch_compute_logits(model, vocab_size: int, banned_token_ids: Optional[list[int]] = None):
-    """Mask the tokens the sampler must never pick.
+    """Mask the tokens the sampler must never pick (NPU: vllm-ascend lacks ``--masked-token-ids``).
 
     Beyond the out-of-vocabulary tail, `banned_token_ids` covers tokens that live *inside* the
     vocabulary yet are still illegal to generate: the vision placeholders, which are meaningless
@@ -159,9 +147,6 @@ class vLLMColocateWorkerExtension:
     2. Online FP8 quantization
     """
 
-    # Set per instance in __new__ when the rollout uses per-token NVFP4 experts.
-    _nvfp4_per_token_config = None
-
     def __new__(cls, **kwargs):
         set_death_signal()
 
@@ -178,8 +163,9 @@ class vLLMColocateWorkerExtension:
             if verl_seed is not None:
                 enable_full_determinism(seed=int(verl_seed))
 
-        # 1. patch for Lora
-        VLLMHijack.hijack()
+        if is_npu_available:
+            # vllm-ascend cannot load a LoRA adapter from tensors (LoRARequest.lora_tensors)
+            VLLMHijack.hijack()
         vllm_config = kwargs.get("vllm_config")
         weight_transfer_config = getattr(vllm_config, "weight_transfer_config", None)
         if getattr(weight_transfer_config, "backend", None) == "verl_delta_ipc":
@@ -189,16 +175,6 @@ class vLLMColocateWorkerExtension:
 
             register_verl_delta_weight_transfer_engine()
 
-        # 2. patch the refit of quantized weights, whether the quantization_config comes
-        # from the checkpoint (e.g. DeepSeek-V4) or from rollout.quantization via hf_overrides.
-        nvfp4_per_token_config = None
-        if is_quantized_model(vllm_config):
-            from verl.utils.vllm.vllm_nvfp4_per_token_utils import nvfp4_per_token_quantization_config
-
-            configure_fp8_ignored_layers_match_mode(vllm_config)
-            apply_vllm_quant_patches()
-            nvfp4_per_token_config = nvfp4_per_token_quantization_config(vllm_config)
-
         # TODO: For ascend NPU, when the corresponding vllm-ascend version is upgraded to v0.13.0,
         # please remove the VLLM_ASCEND_REQUIRED_ENV_VARS variable replacement action.
         # This is only a fix for vllm version < v0.13.0.
@@ -207,9 +183,7 @@ class vLLMColocateWorkerExtension:
                 if k not in os.environ:
                     os.environ[k] = VLLM_ASCEND_REQUIRED_ENV_VARS[k]
 
-        instance = super().__new__(cls)
-        instance._nvfp4_per_token_config = nvfp4_per_token_config
-        return instance
+        return super().__new__(cls)
 
     def _get_drafter_model(self):
         """Return the V1 drafter or V2 speculator model, if available."""
@@ -251,18 +225,12 @@ class vLLMColocateWorkerExtension:
                 yield self._get_drafter_model(), draft_cfg
 
     def monkey_patch_model(self, vocab_size: int, banned_token_ids: Optional[list[int]] = None):
-        for model in self._iter_all_models():
-            # patch compute_logits to avoid sampling OOV and other illegal tokens
-            monkey_patch_compute_logits(model, vocab_size, banned_token_ids)
-            # patch weight loader to support MoE model
-            patch_vllm_moe_model_weight_loader(model)
-        if self._nvfp4_per_token_config is not None:
-            from verl.utils.vllm.vllm_nvfp4_per_token_utils import attest_nvfp4_per_token_runtime, clear_kv_cache
+        """NPU only: vllm-ascend lacks --masked-token-ids and plain-name LoRA expert loading."""
+        from verl.utils.vllm.npu_vllm_patch import clear_moe_lora_base_layer_prefix
 
-            # get_model() unwraps vLLM's CUDA-graph wrapper.
-            model = self.model_runner.get_model()
-            attest_nvfp4_per_token_runtime(model, self._nvfp4_per_token_config)
-            clear_kv_cache(model)
+        for model in self._iter_all_models():
+            monkey_patch_compute_logits(model, vocab_size, banned_token_ids)
+            clear_moe_lora_base_layer_prefix(model)
 
     def update_weights_from_ipc(self, peft_config: dict = None, base_sync_done=False, use_shm: bool = False):
         """Update the weights of the rollout model."""
@@ -272,13 +240,6 @@ class vLLMColocateWorkerExtension:
             self.device = torch.device(f"{get_device_name()}:{self.local_rank}")
 
         # =========================== step 1: prepare for weight loading ===========================
-        # The engine came up on dummy weights, whose init zeroes integer buffers on
-        # ROCm -- including the expert-parallel routing maps, which no weight stream
-        # restores. Repair them before the reload so the rollout routes correctly.
-        if torch.version.hip is not None:
-            for model in self._iter_all_models():
-                restore_moe_expert_maps(model)
-
         if peft_config and base_sync_done:
             # Remove the old LoRA before the new one arrives (applied after is_last below).
             self.remove_lora(VLLM_LORA_INT_ID)
@@ -355,10 +316,6 @@ class vLLMColocateWorkerExtension:
 
             for model, model_config in self._iter_all_models_with_config():
                 finish_reload(model, model_config, self.device)
-            if is_quantized_model(self.model_runner.vllm_config):
-                for model in self._iter_all_models():
-                    reset_uncalibrated_kv_cache_scales(model)
-                    refresh_rocm_attention_weight_caches(model)
 
     def _apply_buffer_updates_all_models(self, buffer_updates, main_named_buffers):
         """Apply buffer updates to the main model and any synced MTP drafter.
@@ -381,7 +338,8 @@ class vLLMColocateWorkerExtension:
         if peft_config and base_sync_done:
             # The caller already copied these out of the receiver's reused IPC bucket buffer (#6454).
             weights = dict(weights)
-            lora_request = TensorLoRARequest(
+            lora_request_cls = TensorLoRARequest if is_npu_available else LoRARequest
+            lora_request = lora_request_cls(
                 lora_name=VLLM_LORA_NAME,
                 lora_int_id=VLLM_LORA_INT_ID,
                 lora_path=VLLM_LORA_PATH,
@@ -393,14 +351,11 @@ class vLLMColocateWorkerExtension:
         else:
             param_updates, buffer_updates, named_buffers = split_buffer_updates(self.model_runner.model, weights)
             if param_updates:
+                if peft_config is not None:
+                    # PEFT names the base weights of LoRA-wrapped modules ``*.base_layer.*``; vLLM loads plain names
+                    param_updates = [(n.replace(".base_layer.", ".", 1), t) for n, t in param_updates]
                 for model in self._iter_all_models():
-                    model_updates = drop_tied_alias_updates(model, param_updates)
-                    if peft_config is None:
-                        model.load_weights(model_updates)
-                    else:
-                        names = {n for n, _ in model.named_parameters(remove_duplicate=False)}
-                        names.update(n for n, _ in model.named_buffers())
-                        model.load_weights((resolve_weight_name(model, n, names), t) for n, t in model_updates)
+                    model.load_weights(param_updates)
             loaded_buffers = self._apply_buffer_updates_all_models(buffer_updates, named_buffers)
             logger.info(f"vLLM load weights, loaded_params: {len(param_updates)}, loaded_buffers: {loaded_buffers}")
 
@@ -429,6 +384,8 @@ class vLLMColocateWorkerExtension:
 
 
 class SuppressSignalInThread:
+    """NPU only: vllm-ascend's run_headless installs signal handlers from the calling thread."""
+
     def __enter__(self):
         self.original_signal = signal.signal
 

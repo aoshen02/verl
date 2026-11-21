@@ -176,6 +176,7 @@ def check_nvfp4_per_token_rollout(
         raise ValueError(
             f"Per-token NVFP4 refits through the colocated naive IPC checkpoint backend, got {checkpoint_backend!r}"
         )
+    engine_kwargs.setdefault("moe_backend", "flashinfer_trtllm")
     compilation_config.setdefault("cudagraph_mode", "FULL_DECODE_ONLY")
     if compilation_config["cudagraph_mode"] != "FULL_DECODE_ONLY":
         raise ValueError("Per-token NVFP4 rollout requires compilation_config['cudagraph_mode']=FULL_DECODE_ONLY")

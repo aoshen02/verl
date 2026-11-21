@@ -296,6 +296,13 @@ def patch_vllm030_rotary_emb():
     ApplyRotaryEmb.__init__ = vllm030_npu_rotary_embedding_init_impl
 
 
+def clear_moe_lora_base_layer_prefix(model: torch.nn.Module) -> None:
+    """Let LoRA-wrapped experts load the plain names verl sends (vllm-ascend matches only PEFT names)."""
+    for module in model.modules():
+        if getattr(module, "lora_base_layer_prefix", ""):
+            module.lora_base_layer_prefix = ""
+
+
 def apply_npu_vllm_patches() -> None:
     """Apply NPU-specific vLLM patches for weight loading, rotary embedding, etc.
 

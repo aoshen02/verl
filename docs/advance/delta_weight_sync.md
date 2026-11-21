@@ -1,6 +1,6 @@
 # Delta Weight Sync
 
-Last updated: 08/23/2026.
+Last updated: 11/20/2026.
 
 ## Motivation
 
@@ -91,7 +91,8 @@ checkpoint engine (including the V1 ``separate_async`` trainer).
   VERL loader registered through the stock ``--custom-weight-loader`` hook, so no SGLang
   patch is needed. vLLM uses a VERL ``WeightTransferEngine`` adapter and vLLM's checkpoint
   patch API. The native model loader still handles checkpoint names, packed
-  parameters, and TP slicing. Both paths verify the checksum and update live weights
+  parameters, and TP slicing. Dense (full) updates run inside vLLM's reload lifecycle
+  (``start_reload`` before the first flush, ``finish_reload`` after the last). Both paths verify the checksum and update live weights
   without keeping a full rollout-model copy.
 - **Seeding**: the first sync is an explicit **dense** pass — the raw weights stream through the same
   bucketed wire with no positions attached (values only), populating the trainer-side snapshot as they

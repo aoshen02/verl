@@ -326,6 +326,13 @@ class vLLMHttpServer:
         from verl.utils.vllm.vllm_quant_utils import set_default_vllm_quantization_backends
 
         set_default_vllm_quantization_backends(effective_quantization_config, engine_kwargs)
+        if not is_torch_npu_available(check_device=False):
+            # never sample the lm_head rows past the tokenizer, nor media placeholders without media
+            vocab_size = self.model_config.hf_config.get_text_config().vocab_size
+            masked = list(range(len(self.model_config.tokenizer), vocab_size))
+            masked += get_vision_placeholder_token_ids(self.model_config.processor)
+            if masked:
+                engine_kwargs.setdefault("masked_token_ids", masked)
 
         compilation_config = engine_kwargs.pop("compilation_config", None) or {}
         if isinstance(compilation_config, str):
@@ -532,15 +539,15 @@ class vLLMHttpServer:
 
         # Don't keep the dummy data in memory
         await engine_client.reset_mm_cache()
-        # A sampled <|image_pad|>/<|video_pad|> has no image behind it, and every consumer of the
-        # sequence assumes it does. Mask them out with the OOV tail, so the policy cannot pick one.
-        await engine_client.collective_rpc(
-            method="monkey_patch_model",
-            kwargs={
-                "vocab_size": len(self.model_config.tokenizer),
-                "banned_token_ids": get_vision_placeholder_token_ids(self.model_config.processor),
-            },
-        )
+        if is_torch_npu_available(check_device=False):
+            # vllm-ascend lacks --masked-token-ids: mask the OOV tail and the vision placeholders
+            await engine_client.collective_rpc(
+                method="monkey_patch_model",
+                kwargs={
+                    "vocab_size": len(self.model_config.tokenizer),
+                    "banned_token_ids": get_vision_placeholder_token_ids(self.model_config.processor),
+                },
+            )
 
         build_app_sig = inspect.signature(build_app)
         supported_tasks: tuple[Any, ...] = ()
@@ -574,6 +581,8 @@ class vLLMHttpServer:
         args.api_server_count = 0
 
         def run_headless_wrapper():
+            if not is_torch_npu_available(check_device=False):
+                return run_headless(args)
             with SuppressSignalInThread():
                 run_headless(args)
 

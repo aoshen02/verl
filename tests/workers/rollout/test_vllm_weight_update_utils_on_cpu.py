@@ -23,48 +23,12 @@ import torch
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
-def _vocab_parallel_embedding_stubs():
-    """Stubs standing in for vLLM's ``VocabParallelEmbedding``, or {} if vLLM is real.
-
-    ``weight_update_utils`` imports that class at module scope for tied-alias
-    detection, so loading it on CPU needs a placeholder. This file only exercises
-    the buffer helpers, which never touch it.
-    """
-    try:
-        importlib.import_module("vllm.model_executor.layers.vocab_parallel_embedding")
-    except ImportError:
-        pass
-    else:
-        return {}
-
-    names = [
-        "vllm",
-        "vllm.model_executor",
-        "vllm.model_executor.layers",
-        "vllm.model_executor.layers.vocab_parallel_embedding",
-    ]
-    stubs = {name: sys.modules.get(name) or types.ModuleType(name) for name in names}
-    stubs[names[-1]].VocabParallelEmbedding = type("VocabParallelEmbedding", (), {})
-    return stubs
-
-
 def _load_weight_update_utils():
     module_path = _REPO_ROOT / "verl/workers/rollout/vllm_rollout/weight_update_utils.py"
     spec = importlib.util.spec_from_file_location("weight_update_utils", module_path)
     module = importlib.util.module_from_spec(spec)
     assert spec is not None and spec.loader is not None
-
-    stubs = _vocab_parallel_embedding_stubs()
-    saved = {name: sys.modules.get(name) for name in stubs}
-    try:
-        sys.modules.update(stubs)
-        spec.loader.exec_module(module)
-    finally:
-        for name, prev in saved.items():
-            if prev is None:
-                sys.modules.pop(name, None)
-            else:
-                sys.modules[name] = prev
+    spec.loader.exec_module(module)
     return module
 
 
@@ -84,44 +48,22 @@ def _load_vllm_rollout_utils():
     module_path = _REPO_ROOT / "verl/workers/rollout/vllm_rollout/utils.py"
 
     fake_outputs = types.ModuleType("vllm.outputs")
-
-    class _FakeRequestOutput:
-        pass
-
-    fake_outputs.RequestOutput = _FakeRequestOutput
+    fake_outputs.RequestOutput = type("RequestOutput", (), {})
+    fake_lora_request = types.ModuleType("vllm.lora.request")
+    fake_lora_request.LoRARequest = type("LoRARequest", (), {})
+    fake_lora = types.ModuleType("vllm.lora")
+    fake_lora.request = fake_lora_request
     fake_vllm = types.ModuleType("vllm")
     fake_vllm.outputs = fake_outputs
+    fake_vllm.lora = fake_lora
 
     fake_vllm_third_party = types.ModuleType("verl.third_party.vllm")
     fake_vllm_third_party.VLLM_SLEEP_LEVEL = 1
     fake_vllm_third_party.get_version = lambda pkg: "0.8.0"
 
     fake_vllm_utils = types.ModuleType("verl.utils.vllm")
-
-    class _FakeTensorLoRARequest:
-        pass
-
-    class _FakeVLLMHijack:
-        @staticmethod
-        def hijack():
-            return None
-
-    fake_vllm_utils.TensorLoRARequest = _FakeTensorLoRARequest
-    fake_vllm_utils.VLLMHijack = _FakeVLLMHijack
-    fake_vllm_utils.resolve_weight_name = lambda model, name, names: name
-
-    fake_vllm_patch = types.ModuleType("verl.utils.vllm.patch")
-    fake_vllm_patch.patch_vllm_moe_model_weight_loader = lambda model: None
-
-    fake_vllm_quant = types.ModuleType("verl.utils.vllm.vllm_quant_utils")
-    fake_vllm_quant.apply_vllm_quant_patches = lambda: None
-    fake_vllm_quant.configure_fp8_ignored_layers_match_mode = lambda config: None
-    fake_vllm_quant.is_quantized_model = lambda config: False
-    fake_vllm_quant.refresh_rocm_attention_weight_caches = lambda model: None
-    fake_vllm_quant.reset_uncalibrated_kv_cache_scales = lambda model: None
-
-    fake_rocm_expert_map = types.ModuleType("verl.utils.vllm.rocm_vllm_moe_expert_map")
-    fake_rocm_expert_map.restore_moe_expert_maps = lambda model: None
+    fake_vllm_utils.TensorLoRARequest = type("TensorLoRARequest", (), {})
+    fake_vllm_utils.VLLMHijack = type("VLLMHijack", (), {"hijack": staticmethod(lambda: None)})
 
     fake_bucketed_transfer = types.ModuleType("verl.workers.rollout.vllm_rollout.bucketed_weight_transfer")
     fake_bucketed_transfer.BucketedWeightReceiver = None
@@ -136,11 +78,10 @@ def _load_vllm_rollout_utils():
     fakes = {
         "vllm": fake_vllm,
         "vllm.outputs": fake_outputs,
+        "vllm.lora": fake_lora,
+        "vllm.lora.request": fake_lora_request,
         "verl.third_party.vllm": fake_vllm_third_party,
         "verl.utils.vllm": fake_vllm_utils,
-        "verl.utils.vllm.patch": fake_vllm_patch,
-        "verl.utils.vllm.vllm_quant_utils": fake_vllm_quant,
-        "verl.utils.vllm.rocm_vllm_moe_expert_map": fake_rocm_expert_map,
         "verl.workers.rollout.vllm_rollout.bucketed_weight_transfer": fake_bucketed_transfer,
         "verl.workers.rollout.vllm_rollout.weight_update_utils": _weight_update_utils,
     }

@@ -1,7 +1,7 @@
 Verl LLM Best Practices (DAPO + Qwen3-235B)
 ===========================================
 
-Last updated: 11/03/2025.
+Last updated: 11/20/2026.
 
 Purpose
 -------
@@ -197,7 +197,7 @@ vLLM inference optimizations
   - ``actor_rollout_ref.rollout.max_num_batched_tokens``:
     Maximum tokens per batch. A practical rule of thumb is ``max(8192, max_prompt_length + max_response_length, max_model_len)``; see the vLLM docs for details.
   - ``actor_rollout_ref.rollout.enforce_eager``:
-    Disables CUDA graphs. By default vLLM leverages CUDA graphs for speed at the cost of extra memory (not limited by ``gpu_memory_utilization``); set this to ``True`` when memory is tight.
+    Disables CUDA graphs. Default is ``False``: vLLM leverages CUDA graphs for speed at the cost of extra memory (not limited by ``gpu_memory_utilization``); set this to ``True`` when memory is tight.
   - ``actor_rollout_ref.rollout.cudagraph_capture_sizes``:
     Explicit capture batch sizes for CUDA graphs. Default is ``null``; on memory-constrained systems try ``[1, 2, 4, 8, 16, 32]``.
 

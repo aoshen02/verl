@@ -1,6 +1,6 @@
 # Low-Precision Rollout and Quantization-Aware Training
 
-Last updated: 11/2/2026
+Last updated: 11/20/2026
 
 In RL training, rollout usually dominates the step time, and for large MoE models it is bound by memory capacity and bandwidth. Running rollout in low precision:
 
@@ -67,26 +67,27 @@ express different schemes for linear and routed MoE layers.
 
 The trainer must be Megatron (FSDP is not yet supported for this feature). The rollout engine can be vLLM or SGLang; TRT-LLM raises an error if `rollout.quantization` is set. The engine columns list the compressed-tensors scheme each engine implements.
 
-verl defaults supported FP8, MXFP8 and MXFP4 Linear/MoE kernels to DeepGEMM.
+verl defaults supported FP8 and MXFP8 Linear/MoE kernels and MXFP4 Linear kernels to DeepGEMM; MXFP4 MoE kernels are left to vLLM and SGLang.
 The training path is moving to the same backend, so this default avoids
 backend-dependent activation quantization, scale layouts and fused-MoE
 epilogues drifting between training and inference. It also prevents an engine's
 `auto` policy from changing kernels across versions or GPU architectures.
 Explicit rollout engine kwargs take precedence and can select Linear and MoE
 backends independently. The exceptions are vLLM MXFP8 Linear, for which vLLM
-0.29 has no DeepGEMM kernel, and NVFP4, for which neither engine provides a
-DeepGEMM implementation.
+has no DeepGEMM kernel, vLLM MXFP4 MoE, whose MXFP8 activations DeepGEMM does
+not run, and NVFP4, for which neither engine provides a DeepGEMM
+implementation.
 
 | Precision | Preset | QAT mode | GPU | vLLM Linear | vLLM MoE | SGLang Linear | SGLang MoE | vLLM status in verl | SGLang status in verl |
 |---|---|---|---|---|---|---|---|---|---|
 | FP8 block (E4M3, 128x128 weight blocks, dynamic 1x128 activations) | `FP8_BLOCK` | `fp8` | Hopper / Blackwell | `W8A8Fp8`<br>`linear_backend=deep_gemm`² | `W8A8Fp8MoE`<br>`moe_backend=deep_gemm` | `W8A8Fp8`<br>`fp8_gemm_runner_backend=deep_gemm` | `W8A8Fp8MoE`<br>`moe_runner_backend=deep_gemm` | ✅ Hopper / Blackwell² | ✅ Hopper |
 | MXFP8 | `MXFP8` | `mxfp8` | Blackwell | `W8A8Mxfp8`<br>FlashInfer CuteDSL¹ | `W8A8Mxfp8MoE`<br>`moe_backend=deep_gemm` | native `quant_method=mxfp8`<br>`fp8_gemm_runner_backend=deep_gemm` | native `quant_method=mxfp8`<br>`moe_runner_backend=deep_gemm` | ✅ Blackwell | ✅ Blackwell |
-| MXFP4 (MoE only) | `MXFP4` | `mxfp4` / `mxfp4_mxfp8` | Blackwell | ❌ (BF16 dense) | MXFP4×FP8<br>`moe_backend=deep_gemm` | ❌ (BF16 dense) | MXFP4×FP8<br>`moe_runner_backend=deep_gemm` | ✅ Blackwell (MoE only) | ✅ Blackwell (MoE only) |
+| MXFP4 (MoE only) | `MXFP4` | `mxfp4` / `mxfp4_mxfp8` | Blackwell | ❌ (BF16 dense) | MXFP4×MXFP8<br>backend selected by vLLM | ❌ (BF16 dense) | MXFP4×FP8<br>`moe_runner_backend=deep_gemm` | ✅ Blackwell (MoE only) | ✅ Blackwell (MoE only) |
 | NVFP4 (MoE only, per-token activations) | `NVFP4` | `nvfp4` | Blackwell | ❌ | W4A4<br>`(moe_backend=flashinfer_trtllm)` | ❌ | ❌ | ✅ Blackwell (MoE only) | ❌ |
 
-MXFP8, MXFP4 and NVFP4 need Blackwell (SM100) for the validated paths above. On Hopper, vLLM may fall back to Marlin weight-only kernels, whose numerics differ from Blackwell W8A8 / W4A4; those paths are outside this support and validation matrix. The `MXFP4` preset has no such fallback: its MXFP4-weight × FP8-activation experts are served only by vLLM's DeepGEMM FP4 MoE kernel (SM100/SM120), and Marlin and Triton reject the FP8 1x128 activation scheme, so on Hopper the rollout fails at engine start.
+MXFP8, MXFP4 and NVFP4 need Blackwell (SM100) for the validated paths above. On Hopper, vLLM may fall back to Marlin weight-only kernels, whose numerics differ from Blackwell W8A8 / W4A4; those paths are outside this support and validation matrix. The `MXFP4` preset is validated on Blackwell only; its experts take MXFP8 activations, which vLLM keys as an MXFP8 activation scheme.
 
-¹ verl passes `linear_backend=deep_gemm`, but vLLM 0.29 has no DeepGEMM
+¹ verl passes `linear_backend=deep_gemm`, but vLLM has no DeepGEMM
 MXFP8 Linear kernel and deliberately falls back to its MXFP8 auto-selection.
 On Blackwell this selects FlashInfer CuteDSL. The routed MoE path does use
 DeepGEMM.
@@ -205,9 +206,10 @@ parallel size 1.
 
 ### Engine notes
 
-- **vLLM**: quantized FP8/MXFP8/MXFP4 rollouts default to
+- **vLLM**: quantized FP8/MXFP8 rollouts default to
   `linear_backend=deep_gemm` and `moe_backend=deep_gemm` when those options are
-  omitted. Set either option under `engine_kwargs.vllm` to override it
+  omitted; MXFP4 rollouts default only `linear_backend=deep_gemm` and leave
+  `moe_backend` to vLLM. Set either option under `engine_kwargs.vllm` to override it
   independently. MXFP8 Linear falls back as noted above, while the MXFP4 preset
   has BF16 dense layers.
   Hopper FP8 block configs with FP32 scales explicitly disable DeepGEMM E8M0;
@@ -217,9 +219,9 @@ parallel size 1.
 - **SGLang**: quantized FP8/MXFP8/MXFP4 rollouts similarly default
   `fp8_gemm_runner_backend` and `moe_runner_backend` to `deep_gemm`. Explicit
   values under `engine_kwargs.sglang` take precedence.
-- **vLLM MXFP4**: vLLM 0.29's compressed-tensors path otherwise ignores the
-  requested expert activation scheme. verl routes MXFP4 experts through the
-  DeepGEMM FP4 backend, whose dynamic FP8 activations use group size 128.
+- **vLLM MXFP4**: vLLM keys MXFP4 weights with MXFP8 inputs as an MXFP8
+  activation scheme and selects the MoE kernel itself; verl does not force
+  DeepGEMM, which does not run MXFP8 activations.
 - **vLLM NVFP4**: verl supports only W4A4 routed experts with per-token activations on FlashInfer TRT-LLM. W4A16, static activation scales, dense NVFP4 and other MoE backends are rejected.
 
 ## Example
@@ -260,20 +262,20 @@ SGLang uses the default CUDA Graph configuration):
 |---|---|---|---|---|---|
 | Hopper | vLLM | ✅ | BF16 | - | 0.00031 |
 | Hopper | SGLang | ✅ | BF16 | - | 0.00031 |
-| Hopper | vLLM | ✅ | FP8_BLOCK | DeepGEMM | 0.00225 |
+| Hopper | vLLM | ✅ | FP8_BLOCK | DeepGEMM | 0.00222 |
 | Hopper | SGLang | ✅ | FP8_BLOCK | DeepGEMM | 0.00231 |
-| Hopper | vLLM | ✅ | FP8_BLOCK + FP8 QAT | DeepGEMM | 0.00187 |
+| Hopper | vLLM | ✅ | FP8_BLOCK + FP8 QAT | DeepGEMM | 0.00185 |
 | Hopper | SGLang | ✅ | FP8_BLOCK + FP8 QAT | DeepGEMM | 0.00188 |
-| Blackwell | vLLM | ❌ | MXFP8 linear + MoE | FlashInfer CuteDSL / DeepGEMM | 0.00387 |
-| Blackwell | vLLM | ❌ | MXFP8 linear + MoE + MXFP8 QAT | FlashInfer CuteDSL / DeepGEMM | 0.00325 |
+| Blackwell | vLLM | ❌ | MXFP8 linear + MoE | FlashInfer CuteDSL / DeepGEMM | 0.00475 |
+| Blackwell | vLLM | ❌ | MXFP8 linear + MoE + MXFP8 QAT | FlashInfer CuteDSL / DeepGEMM | 0.00456 |
 | Blackwell | SGLang | ❌ | MXFP8 linear + MoE | DeepGEMM (Linear + MoE) | 0.00324 |
 | Blackwell | SGLang | ❌ | MXFP8 linear + MoE + MXFP8 QAT | DeepGEMM (Linear + MoE) | 0.00327 |
-| Blackwell | vLLM | ❌ | MXFP4 MoE | DeepGEMM (MoE; BF16 Linear) | 0.00790 |
-| Blackwell | vLLM | ❌ | MXFP4 MoE + MXFP4 QAT | DeepGEMM (MoE; BF16 Linear) | 0.00140 |
+| Blackwell | vLLM | ❌ | MXFP4 MoE | DeepGEMM (MoE; BF16 Linear) | 0.00950 |
+| Blackwell | vLLM | ❌ | MXFP4 MoE + MXFP4 QAT | DeepGEMM (MoE; BF16 Linear) | 0.00229 |
 | Blackwell | SGLang | ❌ | MXFP4 MoE | DeepGEMM (MoE; BF16 Linear) | 0.00571 |
 | Blackwell | SGLang | ❌ | MXFP4 MoE + MXFP4 QAT | DeepGEMM (MoE; BF16 Linear) | 0.00200 |
 | Blackwell | vLLM | ❌ | NVFP4 MoE | FlashInfer TRT-LLM (MoE; BF16 Linear) | 0.00966 |
-| Blackwell | vLLM | ❌ | NVFP4 MoE + NVFP4 QAT | FlashInfer TRT-LLM (MoE; BF16 Linear) | 0.00766 |
+| Blackwell | vLLM | ❌ | NVFP4 MoE + NVFP4 QAT | FlashInfer TRT-LLM (MoE; BF16 Linear) | 0.00778 |
 
 ## Limitations
 

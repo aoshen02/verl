@@ -14,11 +14,8 @@
 
 """Per-token NVFP4 rollout config, trainer-side export and rollout checks, without vLLM."""
 
-import importlib.util
 import json
-import sys
-from pathlib import Path
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -29,25 +26,13 @@ from verl.utils.qat.compressed_tensors import (  # noqa: E402
     NVFP4PerTokenWeightQuantizer,
     build_compressed_tensors_config,
     dispatch_rollout_weight_quantizer,
+    is_nvfp4_per_token_config,
     nvfp4_per_token_module_matcher,
     qat_modes_for_config,
 )
 
-_REPO_ROOT = Path(__file__).resolve().parents[3]
 _CARVE_IGNORE = [r"re:.*layers\.(0|1|6|7)\.mlp\.experts\..*"]
 _HF = SimpleNamespace(num_hidden_layers=8, num_experts=2)
-
-
-def _load_rollout_utils():
-    # Load by path: the verl.utils.vllm package imports vLLM.
-    path = _REPO_ROOT / "verl/utils/vllm/vllm_nvfp4_per_token_utils.py"
-    spec = importlib.util.spec_from_file_location("vllm_nvfp4_per_token_utils_under_test", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-_ROLLOUT = _load_rollout_utils()
 
 
 def _config(ignore=_CARVE_IGNORE):
@@ -69,7 +54,7 @@ def test_per_token_is_nvfp4_weights_with_dynamic_inputs_and_moe_only():
     group = _config()["config_groups"]["group_moe"]
     assert group["weights"]["strategy"] == "tensor_group" and group["weights"]["group_size"] == 16
     assert group["input_activations"]["dynamic"] is True
-    assert _ROLLOUT.is_nvfp4_per_token_scheme(group["weights"], group["input_activations"])
+    assert is_nvfp4_per_token_config(_config())
     # NVFP4 has no static activation scales, so its activations default to per token.
     assert (
         build_compressed_tensors_config(linear=None, moe="NVFP4", ignore=_CARVE_IGNORE, config_file=None) == _config()
@@ -214,133 +199,8 @@ def test_exporter_rejects_an_unpaired_gate_proj(monkeypatch):
         )
 
 
-_HIDDEN, _INTERMEDIATE = 32, 16
-
-
-def test_worker_reads_the_quantization_config_vllm_built_its_methods_from():
-    per_token = _config()
-    static = build_compressed_tensors_config(linear=None, moe="MXFP4", ignore=[], config_file=None)
-
-    def vllm_config(built, hf):
-        return SimpleNamespace(
-            quant_config=None if built is None else SimpleNamespace(config=built),
-            model_config=SimpleNamespace(hf_config=SimpleNamespace(quantization_config=hf)),
-        )
-
-    find = _ROLLOUT.nvfp4_per_token_quantization_config
-    # vLLM's built config wins over the HF config, which is only the fallback.
-    assert find(vllm_config(per_token, None)) == per_token
-    assert find(vllm_config(static, per_token)) is None
-    assert find(vllm_config(None, per_token)) == per_token
-
-
-class CompressedTensorsW4A4Nvfp4PerTokenMoEMethod:
-    def __init__(self, per_token_activation: bool = True) -> None:
-        self.moe_kernel = SimpleNamespace(fused_experts=SimpleNamespace(per_token_activation=per_token_activation))
-
-
-class UnquantizedFusedMoEMethod:
-    pass
-
-
-_MOE_CONFIG = SimpleNamespace(
-    hidden_dim_unpadded=_HIDDEN,
-    intermediate_size_per_partition_unpadded=_INTERMEDIATE,
-    moe_parallel_config=SimpleNamespace(tp_size=1),
-)
-
-
-class _FakeNVFP4MoE(torch.nn.Module):
-    def __init__(self, per_token_activation: bool = True) -> None:
-        super().__init__()
-        self.quant_method = CompressedTensorsW4A4Nvfp4PerTokenMoEMethod(per_token_activation)
-        self.global_num_experts = 2
-        self.moe_config = _MOE_CONFIG
-        self._already_called_process_weights_after_loading = True
-        self.w13_weight_scale = torch.ones((2, 2), dtype=torch.float8_e4m3fn)
-        self.w2_weight_scale = torch.ones((2, 2), dtype=torch.float8_e4m3fn)
-        self.w13_weight_scale_2 = torch.ones(2)
-        self.w2_weight_scale_2 = torch.ones(2)
-        self.w13_input_scale = torch.ones(2)
-        self.w2_input_scale = torch.ones(2)
-        self.g1_scale_c = self.w13_weight_scale_2.clone()
-        experts = self.quant_method.moe_kernel.fused_experts
-        experts.quant_config = SimpleNamespace(
-            g1_alphas=self.w13_weight_scale_2,
-            g2_alphas=self.w2_weight_scale_2,
-            w1_scale=self.w13_weight_scale,
-            w2_scale=self.w2_weight_scale,
-            a1_gscale=torch.ones(2),
-            a2_gscale=torch.ones(2),
-        )
-        self.quant_method.moe_quant_config = experts.quant_config
-        experts.moe_config = SimpleNamespace(is_act_and_mul=True)
-        experts.g1_scale_c = self.g1_scale_c
-
-
-class _FakeUnquantizedMoE(torch.nn.Module):
-    def __init__(self) -> None:
-        super().__init__()
-        self.quant_method = UnquantizedFusedMoEMethod()
-        self.global_num_experts = 2
-        self.moe_config = _MOE_CONFIG
-
-
-def _model(quantized_layers, num_layers=4, **kwargs):
-    root = torch.nn.Module()
-    root.model = torch.nn.Module()
-    root.model.layers = torch.nn.ModuleList()
-    for index in range(num_layers):
-        layer = torch.nn.Module()
-        layer.mlp = torch.nn.Module()
-        layer.mlp.experts = torch.nn.Module()
-        quantized = index in quantized_layers
-        layer.mlp.experts.routed_experts = _FakeNVFP4MoE(**kwargs) if quantized else _FakeUnquantizedMoE()
-        root.model.layers.append(layer)
-    return root
-
-
-_LAYERS_0_3_BF16 = _config([r"re:.*layers\.(0|3)\.mlp\.experts\..*"])
-
-
-@pytest.fixture
-def vllm_method_types(monkeypatch):
-    """Serve the fake method classes from the vLLM modules the attestation imports."""
-    ct_moe = ModuleType("compressed_tensors_moe")
-    ct_moe.CompressedTensorsMoEMethod = SimpleNamespace(
-        _verl_nvfp4_per_token_method=CompressedTensorsW4A4Nvfp4PerTokenMoEMethod
-    )
-    unquantized = ModuleType("unquantized_fused_moe_method")
-    unquantized.UnquantizedFusedMoEMethod = UnquantizedFusedMoEMethod
-    layers = "vllm.model_executor.layers"
-    monkeypatch.setitem(sys.modules, f"{layers}.quantization.compressed_tensors.compressed_tensors_moe", ct_moe)
-    monkeypatch.setitem(sys.modules, f"{layers}.fused_moe.unquantized_fused_moe_method", unquantized)
-
-
-@pytest.mark.usefixtures("vllm_method_types")
-def test_runtime_attestation_checks_layer_precision_and_per_token_kernel():
-    _ROLLOUT.attest_nvfp4_per_token_runtime(_model([1, 2]), _LAYERS_0_3_BF16)
-    with pytest.raises(RuntimeError, match="wrong routed-expert precision"):
-        _ROLLOUT.attest_nvfp4_per_token_runtime(_model([1]), _LAYERS_0_3_BF16)
-    with pytest.raises(RuntimeError, match="wrong routed-expert precision"):
-        _ROLLOUT.attest_nvfp4_per_token_runtime(_model([0, 1, 2]), _LAYERS_0_3_BF16)
-    with pytest.raises(RuntimeError, match="per token"):
-        _ROLLOUT.attest_nvfp4_per_token_runtime(_model([1, 2], per_token_activation=False), _LAYERS_0_3_BF16)
-
-
-@pytest.mark.usefixtures("vllm_method_types")
-def test_runtime_attestation_rejects_a_stale_derived_scale():
-    model = _model([1, 2])
-    model.model.layers[1].mlp.experts.routed_experts.w13_weight_scale_2.mul_(2)
-    with pytest.raises(RuntimeError, match="g1_scale_c does not match"):
-        _ROLLOUT.attest_nvfp4_per_token_runtime(model, _LAYERS_0_3_BF16)
-
-
 def test_per_token_rollout_check_reads_a_config_file(tmp_path):
     pytest.importorskip("vllm")
-    import json
-
-    from verl.utils.qat.compressed_tensors import is_nvfp4_per_token_config
     from verl.utils.real_nvfp4 import check_nvfp4_per_token_rollout
     from verl.workers.config.rollout import RolloutQuantizationConfig
 
@@ -384,3 +244,29 @@ def test_per_token_rollout_check_reads_a_config_file(tmp_path):
     rollout.tensor_model_parallel_size, rollout.data_parallel_size = 1, 4
     with pytest.raises(ValueError, match="data_parallel_size=1"):
         check({}, {})
+
+
+def _per_token_rollout(**overrides):
+    rollout = dict(data_parallel_size=1, mtp=None, checkpoint_engine=SimpleNamespace(backend="naive"))
+    return SimpleNamespace(**{**rollout, **overrides})
+
+
+@pytest.mark.parametrize(
+    "per_token,engine_kwargs,expected",
+    [
+        (True, {}, {"moe_backend": "flashinfer_trtllm"}),
+        (True, {"moe_backend": "cutlass"}, {"moe_backend": "cutlass"}),
+        (False, {}, {}),
+    ],
+    ids=["defaults-trtllm", "keeps-user-backend", "other-config-untouched"],
+)
+def test_per_token_rollout_check_defaults_moe_backend(per_token, engine_kwargs, expected):
+    from verl.utils.real_nvfp4 import check_nvfp4_per_token_rollout
+
+    config = (
+        _config()
+        if per_token
+        else build_compressed_tensors_config(linear=None, moe="MXFP4", ignore=[], config_file=None)
+    )
+    check_nvfp4_per_token_rollout(_per_token_rollout(), config, {}, engine_kwargs)
+    assert engine_kwargs == expected

@@ -1,6 +1,6 @@
 # NVFP4 RL on Blackwell
 
-Last updated: 11/02/2026
+Last updated: 11/20/2026
 
 This recipe trains the routed experts of an MoE model in real NVFP4 with Megatron and Transformer Engine,
 and serves the rollout in the same precision. Activations are quantized per token on both sides.
@@ -14,8 +14,8 @@ quantization interface shared by all formats.
 ## Requirements
 
 - Blackwell (SM100) GPUs
-- Validated with PyTorch 2.13 / CUDA 13, Transformer Engine 2.20.2, Megatron-Core 0.19.2, Megatron-Bridge 0.6.2
-  and vLLM 0.32.0 (`uv sync --frozen --extra megatron --extra vllm`)
+- Validated with PyTorch 2.14 / CUDA 13, Transformer Engine 2.20.2, Megatron-Core 0.19.2, Megatron-Bridge 0.6.2
+  and vLLM 0.34.0 (`uv sync --frozen --extra megatron --extra vllm`)
 - Megatron backend, PP=1 without virtual pipeline parallelism
 - vLLM rollout with TP and EP=1 or EP=TP, the colocated `naive` checkpoint engine and `FULL_DECODE_ONLY`
   CUDA graphs. Data-parallel EP, EPLB, context parallelism (DCP/PCP) and speculative decoding are not
@@ -52,7 +52,7 @@ actor_rollout_ref:
 
 ## Rollout
 
-`moe: NVFP4` runs with `moe_activation: nvfp4_per_token` (vLLM's `quantization_config.moe.activation`), the default. It exports NVFP4 expert weights on the trainer side, bit-identical to vLLM's
+`moe: NVFP4` runs with `moe_activation: nvfp4_per_token` (vLLM's `quantization_config.moe.activation`), the default. vLLM selects the per-token path from the compressed-tensors config (`input_activations.dynamic: true`), and verl defaults `moe_backend=flashinfer_trtllm`. It exports NVFP4 expert weights on the trainer side, bit-identical to vLLM's
 online `nvfp4_per_token` quantization, and runs them on FlashInfer's TRT-LLM MoE kernel with per-token
 activation scales. Refits load each bucket in place into the storage the CUDA graphs captured, so the extra
 memory is one MoE layer's post-processing. With rollout TP and EP off, each rank holds a slice of every

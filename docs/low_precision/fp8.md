@@ -1,6 +1,6 @@
 # FP8 RL in verl
 
-Last updated: 11/02/2026
+Last updated: 11/20/2026
 
 verl supports two FP8 modes for accelerating RL training:
 

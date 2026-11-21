@@ -22,7 +22,7 @@ We recommend using the **FSDP / FSDP2** backend to investigate, research and pro
 
 2. Inference:
 
-For inference, vllm 0.18.0 and later versions are supported; older releases are no longer usable with verl.
+For inference, verl locks vllm 0.34.0. The vLLM rollout refits weights through vLLM's reload lifecycle (``start_reload`` / ``finish_reload``, in-place ``VLLM_RELOAD_MODE=direct``, which verl sets), so it needs vllm 0.34 or later on non-NPU devices; older releases are no longer usable with verl.
 
 For SGLang, refer to the :doc:`SGLang Backend<../workers/sglang_worker>` for detailed installation and usage instructions. SGLang rollout is under extensive development and offers many advanced features and optimizations. We encourage users to report any issues or provide feedback via the `SGLang Issue Tracker <https://github.com/zhaochenyang20/Awesome-ML-SYS-Tutorial/issues/106>`_.
 
@@ -73,7 +73,7 @@ shell, a Docker cache bake); see `Managing environments explicitly`_.
    ``TORCH_CUDA_ARCH_LIST`` ``9.0;10.0``, the only CUDA parts an arm64 host
    has). The inference engines
    (``vllm``, ``sglang``, ``sglang-kernel``) come straight from PyPI, whose
-   wheels for the pinned versions are already cu130 / torch-2.13 builds. Only the
+   wheels for the pinned versions are already cu130 builds (torch 2.14 for ``vllm``, torch 2.13 for ``sglang``). Only the
    git-sourced ``megatron-core`` (``core_v0.19.2``, paired with
    ``megatron-bridge`` 0.6.2) is built when the environment is first materialized.
 
